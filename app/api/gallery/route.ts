@@ -7,6 +7,7 @@ import { err, eventBy, json } from "@/lib/http";
 export type GalleryItem = {
   id: string; kind: "photo" | "video"; url: string; thumbUrl: string;
   w: number | null; h: number | null; d: number | null; by: string | null; at: string; hidden?: boolean;
+  /** inline blur placeholder */ p?: string;
 };
 
 /**
@@ -54,7 +55,7 @@ export async function GET(req: Request) {
 
   const items: GalleryItem[] = rows.map((r) => ({
     id: r.id, kind: r.kind, url: r.url!, thumbUrl: r.thumbUrl!, w: r.width, h: r.height, d: r.durationS,
-    by: r.guestName, at: r.readyAt!.toISOString(), ...(admin ? { hidden: r.status === "hidden" } : {}),
+    by: r.guestName, at: r.readyAt!.toISOString(), ...(r.lqip ? { p: r.lqip } : {}), ...(admin ? { hidden: r.status === "hidden" } : {}),
   }));
   const last = rows[rows.length - 1];
   const nextBefore = !since && rows.length === GALLERY.pageSize && last ? `${last.readyAt!.toISOString()}_${last.id}` : null;

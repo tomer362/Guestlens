@@ -4,6 +4,7 @@ import type { ZodSchema } from "zod";
 import { db, schema } from "./db/client";
 import type { EventRow } from "./db/schema";
 import { databaseUrl } from "./db/url";
+import { ensureMigrated } from "./db/migrate";
 
 export const json = (data: unknown, init?: ResponseInit) => NextResponse.json(data, init);
 export const err = (status: number, code: string) => NextResponse.json({ error: code }, { status });
@@ -31,6 +32,7 @@ const demoMode = () => process.env.GL_DEMO === "1" || (!databaseUrl() && process
 export async function eventBy(field: "slug" | "id", value: string): Promise<EventRow | null> {
   if (demoMode()) return value === DEMO_EVENT[field] ? DEMO_EVENT : null;
   const k = `${field}:${value}`;
+  await ensureMigrated();
   const hit = cache.get(k);
   if (hit && Date.now() - hit.at < TTL) return hit.row;
   const col = field === "slug" ? schema.events.slug : schema.events.id;

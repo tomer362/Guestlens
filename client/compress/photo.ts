@@ -1,5 +1,10 @@
+import { encodeLqipPixels } from "@/lib/lqip";
 const MAX_EDGE = 2048;
-const THUMB_EDGE = 400;
+/** Grid tiles are ~117 CSS px squares → ~350 device px at DPR 3. */
+const THUMB_EDGE = 360;
+const THUMB_QUALITY = 0.6;
+/** Long edge of the inline color-grid placeholder. */
+const LQIP_EDGE = 4;
 const QUALITY = 0.75;
 
 export interface Encoded { blob: Blob; type: "image/webp" | "image/jpeg"; width: number; height: number; }
@@ -43,16 +48,74 @@ export async function encodeScaled(src: CanvasImageSource, sw: number, sh: numbe
   return { blob, type, width: w, height: h };
 }
 
+function canvas2d(w: number, h: number) {
+  if (typeof OffscreenCanvas !== "undefined") {
+    const c = new OffscreenCanvas(w, h);
+    return { c, ctx: c.getContext("2d")! as OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D };
+  }
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  return { c, ctx: c.getContext("2d")! };
+}
+
+async function toBlob(c: OffscreenCanvas | HTMLCanvasElement, type: string, q: number): Promise<Blob | null> {
+  if ("convertToBlob" in c) return c.convertToBlob({ type, quality: q }).catch(() => null);
+  return new Promise((r) => c.toBlob(r, type, q));
+}
+
+/**
+ * Square, center-cropped thumbnail: exactly what the grid shows, so no pixels are
+ * wasted on cropped-away edges and the tile is never upscaled.
+ */
+export async function encodeSquareThumb(src: CanvasImageSource, sw: number, sh: number): Promise<Encoded> {
+  const side = Math.min(sw, sh);
+  const size = Math.min(THUMB_EDGE, side);
+  const { c, ctx } = canvas2d(size, size);
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(src, (sw - side) / 2, (sh - side) / 2, side, side, 0, 0, size, size);
+  const type = (await supportsWebpEncode()) ? "image/webp" : "image/jpeg";
+  let blob = await toBlob(c, type, THUMB_QUALITY);
+  if (!blob || blob.type !== type) {
+    // OffscreenCanvas without WebP: redo on a DOM canvas
+    const d = document.createElement("canvas"); d.width = d.height = size;
+    const dctx = d.getContext("2d")!; dctx.imageSmoothingQuality = "high";
+    dctx.drawImage(src, (sw - side) / 2, (sh - side) / 2, side, side, 0, 0, size, size);
+    blob = await new Promise<Blob | null>((r) => d.toBlob(r, type, THUMB_QUALITY));
+  }
+  if (!blob) throw new Error("encode_failed");
+  return { blob, type, width: size, height: size };
+}
+
+/** 4×3 color grid placeholder (see lib/lqip.ts), ~52 characters. */
+export async function encodeLqip(src: CanvasImageSource, sw: number, sh: number): Promise<string | undefined> {
+  try {
+    const s = LQIP_EDGE / Math.max(sw, sh);
+    const w = Math.max(1, Math.round(sw * s)), h = Math.max(1, Math.round(sh * s));
+    const c = document.createElement("canvas"); c.width = w; c.height = h;
+    const ctx = c.getContext("2d", { willReadFrequently: true })!;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(src, 0, 0, w, h);
+    return encodeLqipPixels(ctx.getImageData(0, 0, w, h).data, w, h);
+  } catch {
+    return undefined;
+  }
+}
+
+export async function makeThumbs(src: CanvasImageSource, sw: number, sh: number) {
+  const [thumb, lqip] = await Promise.all([encodeSquareThumb(src, sw, sh), encodeLqip(src, sw, sh)]);
+  return { thumb, lqip };
+}
+
 /**
  * 16 MP phone photo (~6.5 MB) → 2048 px WebP q75 (~600 KB) + 400 px thumb.
  * Re-encoding drops EXIF/GPS. createImageBitmap applies EXIF orientation.
  */
-export async function compressPhoto(file: Blob): Promise<{ main: Encoded; thumb: Encoded }> {
+export async function compressPhoto(file: Blob): Promise<{ main: Encoded; thumb: Encoded; lqip?: string }> {
   const bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
   try {
     const main = await encodeScaled(bmp, bmp.width, bmp.height, MAX_EDGE);
-    const thumb = await encodeScaled(bmp, bmp.width, bmp.height, THUMB_EDGE, 0.7);
-    return { main, thumb };
+    const { thumb, lqip } = await makeThumbs(bmp, bmp.width, bmp.height);
+    return { main, thumb, lqip };
   } finally {
     bmp.close();
   }

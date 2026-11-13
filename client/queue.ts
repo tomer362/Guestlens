@@ -22,6 +22,8 @@ export interface QueueItem {
   fileType?: string;
   thumb?: Blob;
   thumbType?: "image/webp" | "image/jpeg";
+  /** tiny blurred preview (data URL) */
+  lqip?: string;
   sha256?: string;
   width?: number; height?: number; durationS?: number;
   mediaId?: string;
@@ -85,9 +87,9 @@ class Rejected extends Error { constructor(public code: string) { super(code); }
 async function prepare(it: QueueItem): Promise<Partial<QueueItem>> {
   const src = it.original!;
   if (it.kind === "photo") {
-    const { main, thumb } = await compressPhoto(src);
+    const { main, thumb, lqip } = await compressPhoto(src);
     return {
-      file: main.blob, fileType: main.type, thumb: thumb.blob, thumbType: thumb.type,
+      file: main.blob, fileType: main.type, thumb: thumb.blob, thumbType: thumb.type, lqip,
       width: main.width, height: main.height, sha256: await sha256Hex(main.blob),
     };
   }
@@ -95,11 +97,12 @@ async function prepare(it: QueueItem): Promise<Partial<QueueItem>> {
   // Prefer a frame decoded from the compressed MP4; fall back to a <video> grab.
   const fromMp4 = await posterFromMp4(v.blob);
   const poster = fromMp4 ? null : await posterFrame(v.blob).catch(() => posterFrame(src));
-  const thumb = fromMp4 ?? poster!.thumb;
+  const thumb = fromMp4?.thumb ?? poster!.thumb;
+  const lqip = fromMp4 ? fromMp4.lqip : poster?.lqip;
   const duration = v.duration ?? poster?.duration ?? 0;
   if (duration > 181) throw new Rejected("tooLong");
   return {
-    file: v.blob, fileType: "video/mp4", thumb: thumb.blob, thumbType: thumb.type,
+    file: v.blob, fileType: "video/mp4", thumb: thumb.blob, thumbType: thumb.type, lqip,
     width: v.width ?? poster?.width, height: v.height ?? poster?.height,
     durationS: duration > 0 ? Math.round(duration * 10) / 10 : undefined,
     sha256: await sha256Hex(v.blob),
@@ -135,7 +138,7 @@ async function processOne(it: QueueItem) {
       const body = {
         sha256: it.sha256, kind: it.kind, contentType: it.fileType, bytes: it.file!.size,
         thumbType: it.thumbType, thumbBytes: it.thumb!.size, width: it.width, height: it.height,
-        durationS: it.durationS,
+        durationS: it.durationS, lqip: it.lqip,
       };
       let r = await post("/api/media/reserve", body);
       if (r.status === 401) { await ensureJoined(it.slug, true); r = await post("/api/media/reserve", body); }

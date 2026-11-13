@@ -5,6 +5,7 @@ import { ChevronLeft, ChevronRight, Download, Play, X } from "lucide-react";
 import { useI18n } from "@/lib/i18n/client";
 import { GALLERY } from "@/lib/config";
 import type { GalleryItem } from "@/app/api/gallery/route";
+import { lqipToDataUrl } from "@/lib/lqip";
 
 export function useGallery(slug: string, admin = false) {
   const [items, setItems] = useState<GalleryItem[]>([]);
@@ -76,6 +77,12 @@ export function Lightbox({ items, index, onClose, onIndex }: { items: GalleryIte
     addEventListener("keydown", k);
     return () => removeEventListener("keydown", k);
   });
+  // warm the cache for the next/previous full-size photos so swiping feels instant
+  useEffect(() => {
+    for (const n of [items[index + 1], items[index - 1]]) {
+      if (n && n.kind === "photo") { const im = new Image(); im.decoding = "async"; im.src = n.url; }
+    }
+  }, [items, index]);
   if (!it) return null;
   return (
     <m.div className="fixed inset-0 z-50 flex flex-col bg-black" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
@@ -91,8 +98,9 @@ export function Lightbox({ items, index, onClose, onIndex }: { items: GalleryIte
         {it.kind === "video" ? (
           <video src={it.url} poster={it.thumbUrl} controls playsInline autoPlay className="max-h-full max-w-full" />
         ) : (
-          <img src={it.url} alt="" className="max-h-full max-w-full object-contain" draggable={false}
-            style={{ backgroundImage: `url(${it.thumbUrl})`, backgroundSize: "contain", backgroundRepeat: "no-repeat", backgroundPosition: "center" }} />
+          <img src={it.url} alt="" className="max-h-full max-w-full object-contain" draggable={false} decoding="async"
+            width={it.w ?? undefined} height={it.h ?? undefined}
+            style={it.p ? { backgroundImage: `url(${lqipToDataUrl(it.p)})`, backgroundSize: "100% 100%" } : undefined} />
         )}
       </m.div>
       <div className="safe-bottom flex justify-between px-4 pt-2 text-white">
@@ -105,10 +113,20 @@ export function Lightbox({ items, index, onClose, onIndex }: { items: GalleryIte
 }
 
 export function Tile({ it, onClick, i }: { it: GalleryItem; onClick: () => void; i: number }) {
+  const [loaded, setLoaded] = useState(false);
+  const ph = it.p ? lqipToDataUrl(it.p) : undefined;
+  // first screenful loads eagerly at high priority; the rest lazily
+  const eager = i < 15;
   return (
     <m.button type="button" onClick={onClick} className="relative aspect-square overflow-hidden rounded-lg bg-blush"
-      initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} transition={{ delay: Math.min(i, 12) * 0.03 }}>
-      <img src={it.thumbUrl} alt="" loading="lazy" decoding="async" className="size-full object-cover" />
+      initial={{ opacity: 0, scale: 0.94 }} animate={{ opacity: 1, scale: 1 }} transition={{ delay: Math.min(i, 12) * 0.025 }}>
+      {ph && (
+        // 4×3 color grid from the gallery JSON, blurred: shows instantly, no request
+        <img src={ph} alt="" aria-hidden className="absolute inset-0 size-full scale-125 object-cover blur-lg" />
+      )}
+      <img src={it.thumbUrl} alt="" loading={eager ? "eager" : "lazy"} fetchPriority={eager ? "high" : "low"} decoding="async"
+        width={360} height={360} onLoad={() => setLoaded(true)} ref={(el) => { if (el?.complete && el.naturalWidth) setLoaded(true); }}
+        className={`relative size-full object-cover transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0"}`} />
       {it.kind === "video" && (
         <span className="absolute inset-0 grid place-items-center"><span className="grid size-9 place-items-center rounded-full bg-black/40"><Play className="size-4 fill-white text-white" aria-hidden /></span></span>
       )}
@@ -125,7 +143,8 @@ export function Gallery({ slug }: { slug: string }) {
   useEffect(() => {
     const el = sentinel.current;
     if (!el) return;
-    const io = new IntersectionObserver((e) => { if (e[0].isIntersecting) g.more(); }, { rootMargin: "600px" });
+    // fetch the next page well before the user reaches the end
+    const io = new IntersectionObserver((e) => { if (e[0].isIntersecting) g.more(); }, { rootMargin: "1500px" });
     io.observe(el);
     return () => io.disconnect();
   }, [g.more]);

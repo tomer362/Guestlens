@@ -37,6 +37,8 @@ export const media = pgTable("media", {
   durationS: real("duration_s"),
   url: text("url"),
   thumbUrl: text("thumb_url"),
+  /** tiny blurred preview as a data URL, sent inline with the gallery */
+  lqip: text("lqip"),
   status: text("status", { enum: ["reserved", "ready", "hidden", "failed"] }).notNull().default("reserved"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   readyAt: timestamp("ready_at", { withTimezone: true }),

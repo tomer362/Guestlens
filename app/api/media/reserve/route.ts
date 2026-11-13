@@ -6,6 +6,7 @@ import { consume, releaseStorage } from "@/lib/budget";
 import { LIMITS } from "@/lib/config";
 import { err, eventBy, json, parse } from "@/lib/http";
 import { storage } from "@/lib/storage";
+import { LQIP_RE } from "@/lib/lqip";
 
 const Body = z.object({
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
@@ -17,6 +18,7 @@ const Body = z.object({
   width: z.number().int().positive().optional(),
   height: z.number().int().positive().optional(),
   durationS: z.number().nonnegative().optional(),
+  lqip: z.string().max(200).regex(LQIP_RE).optional(),
 });
 
 /** Mark stale reservations failed and give their bytes back. Cheap, bounded, runs lazily. */
@@ -79,7 +81,7 @@ export async function POST(req: Request) {
   const values = {
     eventId: event.id, guestId: g.gid, guestName: guest?.n ?? null, kind: b.kind, sha256: b.sha256,
     contentType: b.contentType, bytes: b.bytes, thumbBytes: b.thumbBytes,
-    width: b.width, height: b.height, durationS: b.durationS,
+    width: b.width, height: b.height, durationS: b.durationS, lqip: b.lqip ?? null,
     status: "reserved" as const, createdAt: new Date(), url: null, thumbUrl: null, readyAt: null,
   };
 

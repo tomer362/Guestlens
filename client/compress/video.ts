@@ -1,12 +1,12 @@
 import { LIMITS } from "@/lib/config";
-import { encodeScaled, THUMB_EDGE, type Encoded } from "./photo";
+import { makeThumbs, THUMB_EDGE, type Encoded } from "./photo";
 
 export class VideoError extends Error {
   constructor(public code: "tooBig" | "tooLong" | "unsupported") { super(code); }
 }
 
 /** Grab a poster frame at ~1 s with a <video> element (works without WebCodecs). */
-export async function posterFrame(file: Blob): Promise<{ thumb: Encoded; duration: number; width: number; height: number }> {
+export async function posterFrame(file: Blob): Promise<{ thumb: Encoded; lqip?: string; duration: number; width: number; height: number }> {
   const url = URL.createObjectURL(file);
   const v = document.createElement("video");
   v.muted = true; v.playsInline = true; v.preload = "auto"; v.src = url;
@@ -26,8 +26,8 @@ export async function posterFrame(file: Blob): Promise<{ thumb: Encoded; duratio
       if (rvfc) rvfc.call(v, done); else v.onseeked = done;
       setTimeout(done, 3000);
     });
-    const thumb = await encodeScaled(v, v.videoWidth, v.videoHeight, THUMB_EDGE, 0.7);
-    return { thumb, duration, width: v.videoWidth, height: v.videoHeight };
+    const { thumb, lqip } = await makeThumbs(v, v.videoWidth, v.videoHeight);
+    return { thumb, lqip, duration, width: v.videoWidth, height: v.videoHeight };
   } finally {
     URL.revokeObjectURL(url);
   }
@@ -40,7 +40,7 @@ export async function canTranscode(): Promise<boolean> {
 }
 
 /** Poster frame decoded by Mediabunny (reliable on iOS, unlike drawing a <video>). */
-export async function posterFromMp4(blob: Blob): Promise<Encoded | null> {
+export async function posterFromMp4(blob: Blob): Promise<{ thumb: Encoded; lqip?: string } | null> {
   try {
     const mb = await import("mediabunny");
     const input = new mb.Input({ source: new mb.BlobSource(blob), formats: mb.ALL_FORMATS });
@@ -48,12 +48,15 @@ export async function posterFromMp4(blob: Blob): Promise<Encoded | null> {
     if (!track || !(await track.canDecode())) return null;
     const dur = await input.computeDuration();
     const landscape = track.displayWidth >= track.displayHeight;
-    const sink = new mb.CanvasSink(track, landscape ? { width: THUMB_EDGE } : { height: THUMB_EDGE });
+    const scale = THUMB_EDGE / Math.min(track.displayWidth, track.displayHeight);
+    const sink = new mb.CanvasSink(track, landscape
+      ? { height: Math.min(track.displayHeight, THUMB_EDGE), width: Math.round(track.displayWidth * Math.min(1, scale)) }
+      : { width: Math.min(track.displayWidth, THUMB_EDGE), height: Math.round(track.displayHeight * Math.min(1, scale)) });
     const first = await track.getFirstTimestamp();
     const frame = await sink.getCanvas(first + Math.min(1, dur / 2));
     if (!frame) return null;
     const c = frame.canvas;
-    return await encodeScaled(c, c.width, c.height, THUMB_EDGE, 0.7);
+    return await makeThumbs(c, c.width, c.height);
   } catch {
     return null;
   }

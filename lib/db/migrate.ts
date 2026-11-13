@@ -18,8 +18,22 @@ export async function migrate(): Promise<string[]> {
     if (done.has(f)) continue;
     const stmts = readFileSync(path.join(dir, f), "utf8").split("--> statement-breakpoint").map((s) => s.trim()).filter(Boolean);
     for (const s of stmts) await d.execute(sql.raw(s));
-    await d.execute(sql`insert into _gl_migrations (name) values (${f})`);
+    await d.execute(sql`insert into _gl_migrations (name) values (${f}) on conflict do nothing`);
     applied.push(f);
   }
   return applied;
+}
+
+let once: Promise<void> | null = null;
+/**
+ * Run pending migrations once per server instance (one cheap query when up to date).
+ * New columns ship with a deploy; no manual step needed. Migrations must be idempotent
+ * (IF NOT EXISTS), since two cold instances can race.
+ */
+export function ensureMigrated(): Promise<void> {
+  once ??= migrate().then(
+    (applied) => { if (applied.length) console.info("[migrate] applied", applied); },
+    (e) => { once = null; console.error("[migrate] failed", e); },
+  );
+  return once;
 }
