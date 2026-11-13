@@ -1,10 +1,10 @@
-import { LIMITS } from "@/lib/config";
-import { diag as report } from "@/client/diag";
 import { makeThumbs, THUMB_EDGE, type Encoded } from "./photo";
+import { diag as report } from "@/client/diag";
+import { prepareVideo, VideoError, type VideoResult } from "./video-core";
+import type { WorkerOut } from "./video.worker";
 
-export class VideoError extends Error {
-  constructor(public code: "tooBig" | "tooLong" | "unsupported") { super(code); }
-}
+export { VideoError, canTranscode } from "./video-core";
+export type { VideoPath } from "./video-core";
 
 /** Grab a poster frame at ~1 s with a <video> element (works without WebCodecs). */
 export async function posterFrame(file: Blob): Promise<{ thumb: Encoded; lqip?: string; duration: number; width: number; height: number }> {
@@ -34,12 +34,6 @@ export async function posterFrame(file: Blob): Promise<{ thumb: Encoded; lqip?: 
   }
 }
 
-export async function canTranscode(): Promise<boolean> {
-  if (typeof VideoEncoder === "undefined" || typeof VideoDecoder === "undefined") return false;
-  const { canEncodeVideo } = await import("mediabunny");
-  return canEncodeVideo("avc", { width: 1920, height: 1080, bitrate: 2_500_000 }).catch(() => false);
-}
-
 /** Poster frame decoded by Mediabunny (reliable on iOS, unlike drawing a <video>). */
 export async function posterFromMp4(blob: Blob): Promise<{ thumb: Encoded; lqip?: string } | null> {
   try {
@@ -63,104 +57,34 @@ export async function posterFromMp4(blob: Blob): Promise<{ thumb: Encoded; lqip?
   }
 }
 
-/** Above this the clip is worth re-encoding; below it we keep the original stream untouched. */
-const KEEP_BITRATE = 5_000_000;
-const TARGET_BITRATE = 2_500_000;
-
-export type VideoPath = "original" | "remux" | "transcode";
-
 /**
- * Make the video upload-ready as cheaply as possible, without losing quality:
- *  1. "original"  H.264 MP4, ≤1080p, ≤5 Mbps: upload the file as-is (instant).
- *  2. "remux"     same stream in a .mov/other container: copy packets into MP4 (seconds, lossless).
- *  3. "transcode" HEVC / 4K / high bitrate: re-encode video to H.264 ≤1080p ~2.5 Mbps with
- *                 hardware acceleration. Audio is always copied, never re-encoded.
- * Mediabunny is loaded lazily, so photo-only guests never download it.
+ * Prepare a video for upload in a dedicated Web Worker (falls back to the main thread).
+ * See video-core.ts for the original / remux / transcode decision.
  */
-export async function compressVideo(
-  file: Blob, onProgress?: (p: number) => void, onInfo?: (s: string) => void,
-): Promise<{ blob: Blob; width?: number; height?: number; duration?: number; path: VideoPath; diag?: string }> {
-  const tStart = performance.now();
-  const el = () => `${((performance.now() - tStart) / 1000).toFixed(1)}s`;
-  report(`video start type=${file.type || "?"} size=${(file.size / 1e6).toFixed(1)}MB ua=${navigator.userAgent.slice(0, 160)}`);
-  if (!(await canTranscode())) {
-    report(`video no-webcodecs-avc @${el()}`);
-    if (file.type === "video/mp4" && file.size <= LIMITS.rawVideoMaxBytes) return { blob: file, path: "original" };
-    throw new VideoError("tooBig");
+export function compressVideo(file: Blob, onProgress?: (p: number) => void, onInfo?: (s: string) => void): Promise<VideoResult> {
+  let worker: Worker | null = null;
+  try {
+    worker = new Worker(new URL("./video.worker.ts", import.meta.url), { type: "module" });
+  } catch {
+    worker = null;
   }
-  const mb = await import("mediabunny");
-  const input = new mb.Input({ source: new mb.BlobSource(file), formats: mb.ALL_FORMATS });
-  const duration = await input.computeDuration();
-  if (duration > LIMITS.maxVideoSeconds + 1) throw new VideoError("tooLong");
-  const track = await input.getPrimaryVideoTrack();
-  const w = track?.displayWidth ?? 0, h = track?.displayHeight ?? 0;
-  const shortEdge = Math.min(w, h) || 1080;
-  const bitrate = duration > 0 ? (file.size * 8) / duration : Infinity;
-  const fps = track ? (await track.computePacketStats(120).catch(() => null))?.averagePacketRate ?? 0 : 0;
-  const fitsAsIs = track?.codec === "avc" && shortEdge <= 1080 && bitrate <= KEEP_BITRATE
-    && file.size <= LIMITS.video.maxBytes;
-
-  report(`video probed @${el()} codec=${track?.codec} ${w}x${h} fps=${fps.toFixed(1)} dur=${duration.toFixed(1)}s br=${(bitrate / 1e6).toFixed(1)}Mbps fitsAsIs=${fitsAsIs}`);
-  const src = `${track?.codec ?? "?"} ${w}x${h} ${Math.round(fps)}fps ${(bitrate / 1e6).toFixed(1)}Mbps ${Math.round(duration)}s ${(file.size / 1e6).toFixed(0)}MB`;
-  if (fitsAsIs && file.type === "video/mp4") {
-    onProgress?.(1);
-    return { blob: file, width: w, height: h, duration, path: "original", diag: `original · ${src}` };
-  }
-  onInfo?.(src);
-
-  const landscape = w >= h;
-  const t0 = performance.now();
-  // Try the hardware encoder first (much faster on phones); some devices reject that
-  // configuration, so fall back to the browser's default choice.
-  let buf: ArrayBuffer | null = null;
-  let hwUsed = true;
-  for (const hardwareAcceleration of ["prefer-hardware", "no-preference"] as const) {
-    const target = new mb.BufferTarget();
-    const output = new mb.Output({ format: new mb.Mp4OutputFormat({ fastStart: "in-memory" }), target });
-    const input2 = new mb.Input({ source: new mb.BlobSource(file), formats: mb.ALL_FORMATS });
-    const conv = await mb.Conversion.init({
-      input: input2, output,
-      // fitsAsIs → no video options → packets are copied (lossless, fast)
-      video: fitsAsIs ? undefined : {
-        codec: "avc", bitrate: TARGET_BITRATE, keyFrameInterval: 2, hardwareAcceleration,
-        // 60 fps phone clips → 30 fps halves the encoding work; 30 fps is the sharing standard
-        ...(fps > 31 ? { frameRate: 30 } : {}),
-        // cap the short edge at 1080 (portrait phone videos stay portrait)
-        ...(shortEdge > 1080 ? (landscape ? { height: 1080 } : { width: 1080 }) : {}),
-      },
-      // no audio options → the phone's AAC track is copied as-is
-    });
-    if (!conv.isValid) {
-      if (hardwareAcceleration === "prefer-hardware" && !fitsAsIs) { hwUsed = false; continue; }
-      if (file.type === "video/mp4" && file.size <= LIMITS.rawVideoMaxBytes) return { blob: file, path: "original" };
-      throw new VideoError("unsupported");
-    }
-    let lastLog = -1;
-    conv.onProgress = (p) => {
-      onProgress?.(p);
-      const step = Math.floor(p * 10);
-      if (step > lastLog) { lastLog = step; report(`video ${hardwareAcceleration} ${Math.round(p * 100)}% @${el()}`); }
+  if (!worker) return prepareVideo(file, { progress: onProgress, info: onInfo, report });
+  const w = worker;
+  return new Promise<VideoResult>((resolve, reject) => {
+    w.onmessage = (e: MessageEvent<WorkerOut>) => {
+      const m = e.data;
+      if (m.type === "progress") onProgress?.(m.p);
+      else if (m.type === "info") onInfo?.(m.s);
+      else if (m.type === "report") report(m.s);
+      else if (m.type === "done") { w.terminate(); resolve(m.result); }
+      else { w.terminate(); reject(m.code ? new VideoError(m.code as VideoError["code"]) : new Error(m.message)); }
     };
-    report(`video convert start ${hardwareAcceleration} valid=${conv.isValid} discarded=${JSON.stringify(conv.discardedTracks.map((d) => d.reason))} @${el()}`);
-    try {
-      await conv.execute();
-      buf = target.buffer;
-      break;
-    } catch (e) {
-      report(`video convert error ${hardwareAcceleration} @${el()}: ${String(e).slice(0, 200)}`);
-      if (hardwareAcceleration === "prefer-hardware" && !fitsAsIs) { hwUsed = false; continue; }
-      throw e;
-    }
-  }
-  if (!buf) throw new VideoError("unsupported");
-  const blob = new Blob([buf], { type: "video/mp4" });
-  console.info("[guestlens] video", fitsAsIs ? "remux" : "transcode", {
-    seconds: Math.round(duration), inMB: +(file.size / 1e6).toFixed(1), outMB: +(blob.size / 1e6).toFixed(1),
-    tookS: +((performance.now() - t0) / 1000).toFixed(1), codec: track?.codec, w, h,
+    w.onerror = (ev) => {
+      // worker failed to load (old browser / CSP): run on the main thread instead
+      w.terminate();
+      report(`video worker error ${ev.message ?? ""} → main thread`);
+      prepareVideo(file, { progress: onProgress, info: onInfo, report }).then(resolve, reject);
+    };
+    w.postMessage({ file });
   });
-  if (blob.size > LIMITS.video.maxBytes) throw new VideoError("tooBig");
-  const took = (performance.now() - t0) / 1000;
-  report(`video done @${el()} out=${(blob.size / 1e6).toFixed(1)}MB`);
-  const diag = `${fitsAsIs ? "remux" : "transcode"}${hwUsed ? "" : " (sw)"} ${took.toFixed(0)}s → ${(blob.size / 1e6).toFixed(0)}MB · ${src}`;
-  return { blob, width: w, height: h, duration, path: fitsAsIs ? "remux" : "transcode", diag };
 }

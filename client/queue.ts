@@ -168,8 +168,11 @@ async function processOne(it: QueueItem) {
     if (!it.fileUrl) {
       await db.items.update(id, { stage: "file" });
       const start = it.kind === "video" ? 0.5 : 0;
+      let lastWrite = 0;
       it.fileUrl = await uploadWithTicket(it.tickets!.file, it.file!, (f) => {
-        db.items.update(id, { progress: start + f * (1 - start) });
+        // throttle IndexedDB writes (each one re-renders the list)
+        const now = Date.now();
+        if (now - lastWrite > 400 || f >= 1) { lastWrite = now; db.items.update(id, { progress: start + f * (1 - start) }); }
       });
       await db.items.update(id, { fileUrl: it.fileUrl });
     }
