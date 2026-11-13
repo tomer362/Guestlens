@@ -1,4 +1,5 @@
 import { LIMITS } from "@/lib/config";
+import { diag as report } from "@/client/diag";
 import { makeThumbs, THUMB_EDGE, type Encoded } from "./photo";
 
 export class VideoError extends Error {
@@ -77,9 +78,13 @@ export type VideoPath = "original" | "remux" | "transcode";
  * Mediabunny is loaded lazily, so photo-only guests never download it.
  */
 export async function compressVideo(
-  file: Blob, onProgress?: (p: number) => void,
+  file: Blob, onProgress?: (p: number) => void, onInfo?: (s: string) => void,
 ): Promise<{ blob: Blob; width?: number; height?: number; duration?: number; path: VideoPath; diag?: string }> {
+  const tStart = performance.now();
+  const el = () => `${((performance.now() - tStart) / 1000).toFixed(1)}s`;
+  report(`video start type=${file.type || "?"} size=${(file.size / 1e6).toFixed(1)}MB ua=${navigator.userAgent.slice(0, 160)}`);
   if (!(await canTranscode())) {
+    report(`video no-webcodecs-avc @${el()}`);
     if (file.type === "video/mp4" && file.size <= LIMITS.rawVideoMaxBytes) return { blob: file, path: "original" };
     throw new VideoError("tooBig");
   }
@@ -95,11 +100,13 @@ export async function compressVideo(
   const fitsAsIs = track?.codec === "avc" && shortEdge <= 1080 && bitrate <= KEEP_BITRATE
     && file.size <= LIMITS.video.maxBytes;
 
+  report(`video probed @${el()} codec=${track?.codec} ${w}x${h} fps=${fps.toFixed(1)} dur=${duration.toFixed(1)}s br=${(bitrate / 1e6).toFixed(1)}Mbps fitsAsIs=${fitsAsIs}`);
   const src = `${track?.codec ?? "?"} ${w}x${h} ${Math.round(fps)}fps ${(bitrate / 1e6).toFixed(1)}Mbps ${Math.round(duration)}s ${(file.size / 1e6).toFixed(0)}MB`;
   if (fitsAsIs && file.type === "video/mp4") {
     onProgress?.(1);
     return { blob: file, width: w, height: h, duration, path: "original", diag: `original · ${src}` };
   }
+  onInfo?.(src);
 
   const landscape = w >= h;
   const t0 = performance.now();
@@ -128,13 +135,20 @@ export async function compressVideo(
       if (file.type === "video/mp4" && file.size <= LIMITS.rawVideoMaxBytes) return { blob: file, path: "original" };
       throw new VideoError("unsupported");
     }
-    conv.onProgress = (p) => onProgress?.(p);
+    let lastLog = -1;
+    conv.onProgress = (p) => {
+      onProgress?.(p);
+      const step = Math.floor(p * 10);
+      if (step > lastLog) { lastLog = step; report(`video ${hardwareAcceleration} ${Math.round(p * 100)}% @${el()}`); }
+    };
+    report(`video convert start ${hardwareAcceleration} valid=${conv.isValid} discarded=${JSON.stringify(conv.discardedTracks.map((d) => d.reason))} @${el()}`);
     try {
       await conv.execute();
       buf = target.buffer;
       break;
     } catch (e) {
-      if (hardwareAcceleration === "prefer-hardware" && !fitsAsIs) { console.warn("[guestlens] HW encode failed, retrying", e); hwUsed = false; continue; }
+      report(`video convert error ${hardwareAcceleration} @${el()}: ${String(e).slice(0, 200)}`);
+      if (hardwareAcceleration === "prefer-hardware" && !fitsAsIs) { hwUsed = false; continue; }
       throw e;
     }
   }
@@ -146,6 +160,7 @@ export async function compressVideo(
   });
   if (blob.size > LIMITS.video.maxBytes) throw new VideoError("tooBig");
   const took = (performance.now() - t0) / 1000;
+  report(`video done @${el()} out=${(blob.size / 1e6).toFixed(1)}MB`);
   const diag = `${fitsAsIs ? "remux" : "transcode"}${hwUsed ? "" : " (sw)"} ${took.toFixed(0)}s → ${(blob.size / 1e6).toFixed(0)}MB · ${src}`;
   return { blob, width: w, height: h, duration, path: fitsAsIs ? "remux" : "transcode", diag };
 }

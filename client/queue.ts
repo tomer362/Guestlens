@@ -6,6 +6,7 @@ import { compressVideo, posterFrame, posterFromMp4, VideoError } from "./compres
 import { sha256Hex } from "./hash";
 import { uploadWithTicket } from "./upload";
 import { ensureJoined } from "./session";
+import { diag } from "./diag";
 
 export type ItemStatus =
   | "queued" | "compressing" | "uploading" | "done" | "duplicate" | "waiting" | "failed" | "rejected";
@@ -98,7 +99,8 @@ async function prepare(it: QueueItem): Promise<Partial<QueueItem>> {
     };
   }
   const t0 = performance.now();
-  const v = await compressVideo(src, (p) => qdb().items.update(it.id!, { progress: p * 0.5 }));
+  const v = await compressVideo(src, (p) => qdb().items.update(it.id!, { progress: p * 0.5 }),
+    (info) => qdb().items.update(it.id!, { diag: info }));
   // Prefer a frame decoded from the compressed MP4; fall back to a <video> grab.
   const fromMp4 = await posterFromMp4(v.blob);
   const poster = fromMp4 ? null : await posterFrame(v.blob).catch(() => posterFrame(src));
@@ -180,6 +182,7 @@ async function processOne(it: QueueItem) {
       throw new Error("expired");
     }
     if (!c.ok) throw new Error(`complete_${c.status}${c.j.error ? `:${c.j.error}` : ""}`);
+    if (it.kind === "video") diag(`video uploaded ${((Date.now() - upStart) / 1000).toFixed(0)}s · ${it.diag ?? ""}`);
     await db.items.update(id, { status: "done", progress: 1, file: undefined, tickets: undefined,
       diag: `${it.diag ?? ""} · upload ${((Date.now() - upStart) / 1000).toFixed(0)}s` });
   } catch (e) {
@@ -193,7 +196,7 @@ async function processOne(it: QueueItem) {
       }
       return;
     }
-    console.warn("[guestlens] upload failed", it.stage, e);
+    diag(`item failed kind=${it.kind} stage=${(await db.items.get(id))?.stage ?? "prepare"} err=${String((e as Error)?.message ?? e).slice(0, 200)}`);
     const attempts = it.attempts + 1;
     const offline = typeof navigator !== "undefined" && !navigator.onLine;
     await db.items.update(id, {
