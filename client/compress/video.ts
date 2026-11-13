@@ -61,7 +61,12 @@ export async function posterFromMp4(blob: Blob): Promise<{ thumb: Encoded; lqip?
  * Prepare a video for upload in a dedicated Web Worker (falls back to the main thread).
  * See video-core.ts for the original / remux / transcode decision.
  */
-export function compressVideo(file: Blob, onProgress?: (p: number) => void, onInfo?: (s: string) => void): Promise<VideoResult> {
+/** Thrown when preparation was stopped because the app went to the background; the item simply resumes later. */
+export class PausedError extends Error { constructor() { super("paused"); } }
+
+export function compressVideo(
+  file: Blob, onProgress?: (p: number) => void, onInfo?: (s: string) => void, signal?: AbortSignal,
+): Promise<VideoResult> {
   let worker: Worker | null = null;
   try {
     worker = new Worker(new URL("./video.worker.ts", import.meta.url), { type: "module" });
@@ -71,6 +76,9 @@ export function compressVideo(file: Blob, onProgress?: (p: number) => void, onIn
   if (!worker) return prepareVideo(file, { progress: onProgress, info: onInfo, report });
   const w = worker;
   return new Promise<VideoResult>((resolve, reject) => {
+    const abort = () => { w.terminate(); report("video paused (app in background)"); reject(new PausedError()); };
+    if (signal?.aborted) return abort();
+    signal?.addEventListener("abort", abort, { once: true });
     w.onmessage = (e: MessageEvent<WorkerOut>) => {
       const m = e.data;
       if (m.type === "progress") onProgress?.(m.p);

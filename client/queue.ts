@@ -2,7 +2,7 @@
 import Dexie, { type Table } from "dexie";
 import type { UploadTicket } from "@/lib/storage/provider";
 import { compressPhoto } from "./compress/photo";
-import { compressVideo, posterFrame, posterFromMp4, VideoError } from "./compress/video";
+import { compressVideo, PausedError, posterFrame, posterFromMp4, VideoError } from "./compress/video";
 import { sha256Hex } from "./hash";
 import { uploadWithTicket } from "./upload";
 import { ensureJoined } from "./session";
@@ -99,8 +99,19 @@ async function prepare(it: QueueItem): Promise<Partial<QueueItem>> {
     };
   }
   const t0 = performance.now();
-  const v = await compressVideo(src, (p) => qdb().items.update(it.id!, { progress: p * 0.5 }),
-    (info) => qdb().items.update(it.id!, { diag: info }));
+  // iOS/Android take the hardware decoder away from background pages ("Decoder failure"):
+  // stop cleanly when hidden and resume from the start when the guest comes back.
+  const ctrl = new AbortController();
+  const onVis = () => { if (document.visibilityState === "hidden") ctrl.abort(); };
+  document.addEventListener("visibilitychange", onVis);
+  let v: Awaited<ReturnType<typeof compressVideo>>;
+  try {
+    if (document.visibilityState === "hidden") throw new PausedError();
+    v = await compressVideo(src, (p) => qdb().items.update(it.id!, { progress: p * 0.5 }),
+      (info) => qdb().items.update(it.id!, { diag: info }), ctrl.signal);
+  } finally {
+    document.removeEventListener("visibilitychange", onVis);
+  }
   // Prefer a frame decoded from the compressed MP4; fall back to a <video> grab.
   const fromMp4 = await posterFromMp4(v.blob);
   const poster = fromMp4 ? null : await posterFrame(v.blob).catch(() => posterFrame(src));
@@ -133,7 +144,7 @@ async function processOne(it: QueueItem) {
   try {
     // 1. compress (once; the result is persisted)
     if (!it.file) {
-      await db.items.update(id, { status: "compressing", progress: 0 });
+      await db.items.update(id, { status: "compressing", progress: 0, error: undefined });
       const prepared = await prepare(it);
       await db.items.update(id, { ...prepared, original: undefined });
       it.diag = prepared.diag;
@@ -189,6 +200,11 @@ async function processOne(it: QueueItem) {
     await db.items.update(id, { status: "done", progress: 1, file: undefined, tickets: undefined,
       diag: `${it.diag ?? ""} · upload ${((Date.now() - upStart) / 1000).toFixed(0)}s` });
   } catch (e) {
+    if (e instanceof PausedError) {
+      // not a failure: back in line, resumes when the app is visible again (startQueue wakes on visibility)
+      await db.items.update(id, { status: "queued", progress: 0, error: "paused", nextAt: 0 });
+      return;
+    }
     if (e instanceof Rejected || e instanceof VideoError) {
       const code = e instanceof VideoError ? e.code : e.code;
       // budget/limit may clear later → retry slowly; others are final
@@ -225,7 +241,9 @@ async function loop() {
     const inFlight = new Map<number, { kind: QueueItem["kind"]; p: Promise<void> }>();
     for (;;) {
       const now = Date.now();
-      const ready = (await db.items.where("status").anyOf(ACTIVE).filter((i) => i.nextAt <= now).sortBy("createdAt"))
+      const hidden = document.visibilityState === "hidden";
+      const ready = (await db.items.where("status").anyOf(ACTIVE)
+        .filter((i) => i.nextAt <= now && !(hidden && i.error === "paused")).sortBy("createdAt"))
         .filter((i) => !inFlight.has(i.id!));
       const busy = [...inFlight.values()];
       const freeVideo = busy.some((x) => x.kind === "video") ? 0 : 1;

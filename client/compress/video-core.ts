@@ -146,7 +146,8 @@ export async function prepareVideo(file: Blob, hooks: CoreHooks = {}): Promise<V
     } else blob = r;
   } catch (e) {
     if (canFallBackToOriginal && file.type === "video/mp4") { path = "original"; blob = file; }
-    else throw e instanceof VideoError ? e : new VideoError("unsupported");
+    // a decoder/encoder hiccup (e.g. iOS reclaiming the decoder) is retryable, not a verdict on the file
+    else throw e;
   }
   const took = (performance.now() - t0) / 1000;
   report(`video done path=${path} @${el()} out=${(blob.size / 1e6).toFixed(1)}MB`);

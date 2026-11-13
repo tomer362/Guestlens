@@ -1,7 +1,8 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, m } from "motion/react";
-import { ChevronLeft, ChevronRight, Download, Play, X } from "lucide-react";
+import { Play } from "lucide-react";
+import { Viewer } from "./Viewer";
 import { useI18n } from "@/lib/i18n/client";
 import { GALLERY } from "@/lib/config";
 import type { GalleryItem } from "@/app/api/gallery/route";
@@ -63,62 +64,14 @@ export function useGallery(slug: string, admin = false) {
   return { items, setItems, loaded, isPrivate, more, hasMore: !!nextBefore, fresh, clearFresh: () => setFresh(0), reload: load };
 }
 
-export function Lightbox({ items, index, onClose, onIndex }: { items: GalleryItem[]; index: number; onClose: () => void; onIndex: (i: number) => void }) {
-  const { t, f, lang } = useI18n();
-  const it = items[index];
-  const rtl = lang === "he";
-  const step = (d: number) => { const n = index + d; if (n >= 0 && n < items.length) onIndex(n); };
-  useEffect(() => {
-    const k = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-      if (e.key === "ArrowRight") step(rtl ? -1 : 1);
-      if (e.key === "ArrowLeft") step(rtl ? 1 : -1);
-    };
-    addEventListener("keydown", k);
-    return () => removeEventListener("keydown", k);
-  });
-  // warm the cache for the next/previous full-size photos so swiping feels instant
-  useEffect(() => {
-    for (const n of [items[index + 1], items[index - 1]]) {
-      if (n && n.kind === "photo") { const im = new Image(); im.decoding = "async"; im.src = n.url; }
-    }
-  }, [items, index]);
-  if (!it) return null;
-  return (
-    <m.div className="fixed inset-0 z-50 flex flex-col bg-black" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-      <div className="safe-top flex items-center justify-between px-4 pb-2 text-white">
-        <button type="button" onClick={onClose} aria-label={t.common.close} className="grid size-10 place-items-center rounded-full bg-white/10"><X className="size-5" aria-hidden /></button>
-        {it.by && <span className="truncate px-2 text-sm text-white/80">{f(t.gallery.by, { name: it.by })}</span>}
-        <a href={it.url} download target="_blank" rel="noreferrer" aria-label={t.gallery.download} className="grid size-10 place-items-center rounded-full bg-white/10"><Download className="size-5" aria-hidden /></a>
-      </div>
-      <m.div key={it.id} className="relative flex flex-1 items-center justify-center overflow-hidden"
-        initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }}
-        drag="x" dragConstraints={{ left: 0, right: 0 }} dragElastic={0.3}
-        onDragEnd={(_, i) => { const dx = i.offset.x * (rtl ? -1 : 1); if (dx < -60) step(1); else if (dx > 60) step(-1); }}>
-        {it.kind === "video" ? (
-          <video src={it.url} poster={it.thumbUrl} controls playsInline autoPlay className="max-h-full max-w-full" />
-        ) : (
-          <img src={it.url} alt="" className="max-h-full max-w-full object-contain" draggable={false} decoding="async"
-            width={it.w ?? undefined} height={it.h ?? undefined}
-            style={it.p ? { backgroundImage: `url(${lqipToDataUrl(it.p)})`, backgroundSize: "100% 100%" } : undefined} />
-        )}
-      </m.div>
-      <div className="safe-bottom flex justify-between px-4 pt-2 text-white">
-        <button type="button" onClick={() => step(rtl ? 1 : -1)} className="grid size-11 place-items-center rounded-full bg-white/10" aria-label="prev"><ChevronLeft className="size-6" aria-hidden /></button>
-        <span className="self-center text-sm text-white/60">{index + 1} / {items.length}</span>
-        <button type="button" onClick={() => step(rtl ? -1 : 1)} className="grid size-11 place-items-center rounded-full bg-white/10" aria-label="next"><ChevronRight className="size-6" aria-hidden /></button>
-      </div>
-    </m.div>
-  );
-}
-
-export function Tile({ it, onClick, i }: { it: GalleryItem; onClick: () => void; i: number }) {
+export function Tile({ it, onClick, i, hidden }: { it: GalleryItem; onClick: () => void; i: number; hidden?: boolean }) {
   const [loaded, setLoaded] = useState(false);
   const ph = it.p ? lqipToDataUrl(it.p) : undefined;
   // first screenful loads eagerly at high priority; the rest lazily
   const eager = i < 15;
   return (
-    <m.button type="button" onClick={onClick} className="relative aspect-square overflow-hidden rounded-lg bg-blush"
+    <m.button type="button" onClick={onClick} data-tile={it.id} style={{ visibility: hidden ? "hidden" : undefined }}
+      className="relative aspect-square overflow-hidden rounded-lg bg-blush active:brightness-90"
       initial={{ opacity: 0, scale: 0.94 }} animate={{ opacity: 1, scale: 1 }} transition={{ delay: Math.min(i, 12) * 0.025 }}>
       {ph && (
         // 4×3 color grid from the gallery JSON, blurred: shows instantly, no request
@@ -137,7 +90,9 @@ export function Tile({ it, onClick, i }: { it: GalleryItem; onClick: () => void;
 export function Gallery({ slug }: { slug: string }) {
   const { t, f } = useI18n();
   const g = useGallery(slug);
-  const [open, setOpen] = useState<number | null>(null);
+  // track the open item by id: polling prepends new items, which would shift a numeric index
+  const [openId, setOpenId] = useState<string | null>(null);
+  const openIdx = openId ? g.items.findIndex((x) => x.id === openId) : -1;
   const sentinel = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -168,12 +123,15 @@ export function Gallery({ slug }: { slug: string }) {
         <p className="py-24 text-center text-muted">{t.gallery.empty}</p>
       ) : (
         <div className="grid grid-cols-3 gap-1">
-          {g.items.map((it, i) => <Tile key={it.id} it={it} i={i} onClick={() => setOpen(i)} />)}
+          {g.items.map((it, i) => <Tile key={it.id} it={it} i={i} hidden={openIdx === i} onClick={() => setOpenId(it.id)} />)}
         </div>
       )}
       <div ref={sentinel} className="h-10" />
       <AnimatePresence>
-        {open !== null && <Lightbox items={g.items} index={open} onIndex={setOpen} onClose={() => setOpen(null)} />}
+        {openIdx >= 0 && (
+          <Viewer key="viewer" items={g.items} index={openIdx} onIndex={(i) => setOpenId(g.items[i]?.id ?? null)}
+            onClose={() => setOpenId(null)} onMore={g.more} />
+        )}
       </AnimatePresence>
     </div>
   );

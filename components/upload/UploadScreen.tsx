@@ -69,7 +69,7 @@ export const UploadScreen = forwardRef<UploadScreenHandle, { slug: string; uploa
   const pending = today.filter((i) => ["queued", "compressing", "uploading", "waiting"].includes(i.status)).length;
   const statusText = (i: QueueItem) => {
     switch (i.status) {
-      case "queued": return t.upload.queued;
+      case "queued": return i.error === "paused" ? t.upload.paused : t.upload.queued;
       case "compressing": return i.kind === "video" && i.progress ? `${t.upload.compressing} ${Math.round(i.progress * 200)}%` : t.upload.compressing;
       case "uploading": return t.upload.uploading;
       case "done": return t.upload.done;
@@ -152,7 +152,7 @@ export const UploadScreen = forwardRef<UploadScreenHandle, { slug: string; uploa
               <Thumb item={it} />
               <div className="min-w-0 flex-1">
                 <p className={`truncate text-sm ${it.status === "rejected" || it.status === "failed" ? "text-rose-deep" : ""}`}>{statusText(it)}</p>
-                {it.error && it.status !== "done" && it.status !== "rejected" && (
+                {it.error && it.error !== "paused" && it.status !== "done" && it.status !== "rejected" && (
                   <p className="truncate text-[11px] text-muted" dir="ltr" title={it.error}>#{it.attempts} · {it.error}</p>
                 )}
                 {it.diag && (

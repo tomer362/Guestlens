@@ -55,6 +55,7 @@ export const en = {
     progress: "{done} of {total} uploaded",
     waiting: "Waiting for network…",
     queued: "In line…",
+    paused: "Continues when you're back in the app",
     compressing: "Preparing…",
     uploading: "Uploading…",
     done: "Uploaded",
