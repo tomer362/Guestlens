@@ -54,6 +54,7 @@ export const en = {
     queueEmpty: "Nothing waiting. Go catch a moment!",
     progress: "{done} of {total} uploaded",
     waiting: "Waiting for network…",
+    queued: "In line…",
     compressing: "Preparing…",
     uploading: "Uploading…",
     done: "Uploaded",

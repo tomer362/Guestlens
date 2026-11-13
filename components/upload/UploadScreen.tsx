@@ -69,8 +69,8 @@ export const UploadScreen = forwardRef<UploadScreenHandle, { slug: string; uploa
   const pending = today.filter((i) => ["queued", "compressing", "uploading", "waiting"].includes(i.status)).length;
   const statusText = (i: QueueItem) => {
     switch (i.status) {
-      case "queued": return t.upload.compressing;
-      case "compressing": return t.upload.compressing;
+      case "queued": return t.upload.queued;
+      case "compressing": return i.kind === "video" && i.progress ? `${t.upload.compressing} ${Math.round(i.progress * 200)}%` : t.upload.compressing;
       case "uploading": return t.upload.uploading;
       case "done": return t.upload.done;
       case "duplicate": return t.upload.duplicate;
@@ -154,6 +154,10 @@ export const UploadScreen = forwardRef<UploadScreenHandle, { slug: string; uploa
                 <p className={`truncate text-sm ${it.status === "rejected" || it.status === "failed" ? "text-rose-deep" : ""}`}>{statusText(it)}</p>
                 {it.error && it.status !== "done" && it.status !== "rejected" && (
                   <p className="truncate text-[11px] text-muted" dir="ltr" title={it.error}>#{it.attempts} · {it.error}</p>
+                )}
+                {it.diag && (
+                  // diagnostics: what the phone did and how long each step took
+                  <p className="text-[10px] leading-tight text-muted/80 break-all" dir="ltr">{it.diag}</p>
                 )}
                 {(it.status === "uploading" || it.status === "compressing") && (
                   <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-blush">

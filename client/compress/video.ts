@@ -78,7 +78,7 @@ export type VideoPath = "original" | "remux" | "transcode";
  */
 export async function compressVideo(
   file: Blob, onProgress?: (p: number) => void,
-): Promise<{ blob: Blob; width?: number; height?: number; duration?: number; path: VideoPath }> {
+): Promise<{ blob: Blob; width?: number; height?: number; duration?: number; path: VideoPath; diag?: string }> {
   if (!(await canTranscode())) {
     if (file.type === "video/mp4" && file.size <= LIMITS.rawVideoMaxBytes) return { blob: file, path: "original" };
     throw new VideoError("tooBig");
@@ -91,12 +91,14 @@ export async function compressVideo(
   const w = track?.displayWidth ?? 0, h = track?.displayHeight ?? 0;
   const shortEdge = Math.min(w, h) || 1080;
   const bitrate = duration > 0 ? (file.size * 8) / duration : Infinity;
+  const fps = track ? (await track.computePacketStats(120).catch(() => null))?.averagePacketRate ?? 0 : 0;
   const fitsAsIs = track?.codec === "avc" && shortEdge <= 1080 && bitrate <= KEEP_BITRATE
     && file.size <= LIMITS.video.maxBytes;
 
+  const src = `${track?.codec ?? "?"} ${w}x${h} ${Math.round(fps)}fps ${(bitrate / 1e6).toFixed(1)}Mbps ${Math.round(duration)}s ${(file.size / 1e6).toFixed(0)}MB`;
   if (fitsAsIs && file.type === "video/mp4") {
     onProgress?.(1);
-    return { blob: file, width: w, height: h, duration, path: "original" };
+    return { blob: file, width: w, height: h, duration, path: "original", diag: `original · ${src}` };
   }
 
   const landscape = w >= h;
@@ -104,6 +106,7 @@ export async function compressVideo(
   // Try the hardware encoder first (much faster on phones); some devices reject that
   // configuration, so fall back to the browser's default choice.
   let buf: ArrayBuffer | null = null;
+  let hwUsed = true;
   for (const hardwareAcceleration of ["prefer-hardware", "no-preference"] as const) {
     const target = new mb.BufferTarget();
     const output = new mb.Output({ format: new mb.Mp4OutputFormat({ fastStart: "in-memory" }), target });
@@ -113,13 +116,15 @@ export async function compressVideo(
       // fitsAsIs → no video options → packets are copied (lossless, fast)
       video: fitsAsIs ? undefined : {
         codec: "avc", bitrate: TARGET_BITRATE, keyFrameInterval: 2, hardwareAcceleration,
+        // 60 fps phone clips → 30 fps halves the encoding work; 30 fps is the sharing standard
+        ...(fps > 31 ? { frameRate: 30 } : {}),
         // cap the short edge at 1080 (portrait phone videos stay portrait)
         ...(shortEdge > 1080 ? (landscape ? { height: 1080 } : { width: 1080 }) : {}),
       },
       // no audio options → the phone's AAC track is copied as-is
     });
     if (!conv.isValid) {
-      if (hardwareAcceleration === "prefer-hardware" && !fitsAsIs) continue;
+      if (hardwareAcceleration === "prefer-hardware" && !fitsAsIs) { hwUsed = false; continue; }
       if (file.type === "video/mp4" && file.size <= LIMITS.rawVideoMaxBytes) return { blob: file, path: "original" };
       throw new VideoError("unsupported");
     }
@@ -129,7 +134,7 @@ export async function compressVideo(
       buf = target.buffer;
       break;
     } catch (e) {
-      if (hardwareAcceleration === "prefer-hardware" && !fitsAsIs) { console.warn("[guestlens] HW encode failed, retrying", e); continue; }
+      if (hardwareAcceleration === "prefer-hardware" && !fitsAsIs) { console.warn("[guestlens] HW encode failed, retrying", e); hwUsed = false; continue; }
       throw e;
     }
   }
@@ -140,5 +145,7 @@ export async function compressVideo(
     tookS: +((performance.now() - t0) / 1000).toFixed(1), codec: track?.codec, w, h,
   });
   if (blob.size > LIMITS.video.maxBytes) throw new VideoError("tooBig");
-  return { blob, width: w, height: h, duration, path: fitsAsIs ? "remux" : "transcode" };
+  const took = (performance.now() - t0) / 1000;
+  const diag = `${fitsAsIs ? "remux" : "transcode"}${hwUsed ? "" : " (sw)"} ${took.toFixed(0)}s → ${(blob.size / 1e6).toFixed(0)}MB · ${src}`;
+  return { blob, width: w, height: h, duration, path: fitsAsIs ? "remux" : "transcode", diag };
 }

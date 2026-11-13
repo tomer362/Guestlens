@@ -56,6 +56,7 @@ export const he: Dict = {
     queueEmpty: "אין מה להעלות כרגע. לכו לתפוס רגע!",
     progress: "{done} מתוך {total} הועלו",
     waiting: "ממתין לרשת…",
+    queued: "בתור…",
     compressing: "מכין…",
     uploading: "מעלה…",
     done: "הועלה",

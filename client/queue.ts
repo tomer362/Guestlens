@@ -36,6 +36,8 @@ export interface QueueItem {
   error?: string;
   /** which step is running, for diagnostics */
   stage?: "reserve" | "thumb" | "file";
+  /** what the phone did with this item and how long it took (shown in the list) */
+  diag?: string;
 }
 
 class QueueDB extends Dexie {
@@ -87,12 +89,15 @@ class Rejected extends Error { constructor(public code: string) { super(code); }
 async function prepare(it: QueueItem): Promise<Partial<QueueItem>> {
   const src = it.original!;
   if (it.kind === "photo") {
+    const t0 = performance.now();
     const { main, thumb, lqip } = await compressPhoto(src);
     return {
       file: main.blob, fileType: main.type, thumb: thumb.blob, thumbType: thumb.type, lqip,
+      diag: `photo ${((performance.now() - t0) / 1000).toFixed(1)}s · ${(src.size / 1e6).toFixed(1)}MB → ${(main.blob.size / 1e3).toFixed(0)}KB`,
       width: main.width, height: main.height, sha256: await sha256Hex(main.blob),
     };
   }
+  const t0 = performance.now();
   const v = await compressVideo(src, (p) => qdb().items.update(it.id!, { progress: p * 0.5 }));
   // Prefer a frame decoded from the compressed MP4; fall back to a <video> grab.
   const fromMp4 = await posterFromMp4(v.blob);
@@ -105,6 +110,7 @@ async function prepare(it: QueueItem): Promise<Partial<QueueItem>> {
     file: v.blob, fileType: "video/mp4", thumb: thumb.blob, thumbType: thumb.type, lqip,
     width: v.width ?? poster?.width, height: v.height ?? poster?.height,
     durationS: duration > 0 ? Math.round(duration * 10) / 10 : undefined,
+    diag: `${v.diag ?? v.path} · total ${((performance.now() - t0) / 1000).toFixed(0)}s`,
     sha256: await sha256Hex(v.blob),
   };
 }
@@ -128,10 +134,12 @@ async function processOne(it: QueueItem) {
       await db.items.update(id, { status: "compressing", progress: 0 });
       const prepared = await prepare(it);
       await db.items.update(id, { ...prepared, original: undefined });
+      it.diag = prepared.diag;
       it = { ...it, ...prepared, original: undefined };
     }
 
     // 2. reserve
+    const upStart = Date.now();
     await db.items.update(id, { status: "uploading" });
     if (!it.mediaId || !it.tickets) {
       await db.items.update(id, { stage: "reserve" });
@@ -172,7 +180,8 @@ async function processOne(it: QueueItem) {
       throw new Error("expired");
     }
     if (!c.ok) throw new Error(`complete_${c.status}${c.j.error ? `:${c.j.error}` : ""}`);
-    await db.items.update(id, { status: "done", progress: 1, file: undefined, tickets: undefined });
+    await db.items.update(id, { status: "done", progress: 1, file: undefined, tickets: undefined,
+      diag: `${it.diag ?? ""} · upload ${((Date.now() - upStart) / 1000).toFixed(0)}s` });
   } catch (e) {
     if (e instanceof Rejected || e instanceof VideoError) {
       const code = e instanceof VideoError ? e.code : e.code;
