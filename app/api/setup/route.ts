@@ -13,18 +13,22 @@ const Body = z.object({
   pin: z.string().max(20).optional().nullable(),
 });
 
-function keyOk(given: string) {
-  const want = process.env.SETUP_KEY;
-  if (!want || want.length < 12) return false;
-  const a = Buffer.from(given), b = Buffer.from(want);
-  return a.length === b.length && timingSafeEqual(a, b);
+/** Returns an error code, or null when the key matches. Whitespace from copy/paste is ignored. */
+function checkKey(given: string): string | null {
+  const want = process.env.SETUP_KEY?.trim();
+  if (!want) return "setup_key_not_set_on_server: add SETUP_KEY in Vercel for Production, then redeploy";
+  if (want.length < 12) return "setup_key_too_short: SETUP_KEY must be at least 12 characters";
+  const a = Buffer.from(given.trim()), b = Buffer.from(want);
+  if (a.length === b.length && timingSafeEqual(a, b)) return null;
+  return `bad_setup_key: you typed ${a.length} characters, the server's key has ${b.length}`;
 }
 
 /** One-time setup from a phone: create tables, create the event, return the admin key. */
 export async function POST(req: Request) {
   const b = await parse(req, Body);
   if (!b) return err(400, "bad_request");
-  if (!keyOk(b.setupKey)) return err(401, "bad_setup_key");
+  const keyErr = checkKey(b.setupKey);
+  if (keyErr) return err(401, keyErr);
   if (!databaseUrl()) return err(500, "missing_env_DATABASE_URL");
   for (const v of ["BLOB_READ_WRITE_TOKEN", "JWT_SECRET"]) {
     if (!process.env[v]) return err(500, `missing_env_${v}`);
