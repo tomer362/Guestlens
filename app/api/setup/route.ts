@@ -3,6 +3,7 @@ import { z } from "zod";
 import bcrypt from "bcryptjs";
 import { db, schema } from "@/lib/db/client";
 import { migrate } from "@/lib/db/migrate";
+import { databaseUrl } from "@/lib/db/url";
 import { err, json, parse } from "@/lib/http";
 
 const Body = z.object({
@@ -24,7 +25,8 @@ export async function POST(req: Request) {
   const b = await parse(req, Body);
   if (!b) return err(400, "bad_request");
   if (!keyOk(b.setupKey)) return err(401, "bad_setup_key");
-  for (const v of ["DATABASE_URL", "BLOB_READ_WRITE_TOKEN", "JWT_SECRET"]) {
+  if (!databaseUrl()) return err(500, "missing_env_DATABASE_URL");
+  for (const v of ["BLOB_READ_WRITE_TOKEN", "JWT_SECRET"]) {
     if (!process.env[v]) return err(500, `missing_env_${v}`);
   }
   try {
