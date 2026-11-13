@@ -14,6 +14,7 @@ A wedding photo/video PWA. Guests scan a QR code, see a short animated walkthrou
 | Persistent upload queue (IndexedDB, backoff + jitter, resumes after reload, one tab at a time via Web Locks) | `client/queue.ts` |
 | reserve → client token → direct upload → complete (+ `onUploadCompleted` backup) | `app/api/media/*`, `app/api/blob/token` |
 | Gallery: keyset pages + CDN-cached polling | `app/api/gallery`, `components/gallery/Gallery.tsx` |
+| Phone-only first-time setup (tables + event) | `/setup` (needs `SETUP_KEY`) |
 | Admin: usage meters, open/close uploads, private album, PIN, hide, URL export, printable QR | `/admin/<slug>` |
 | Offline app shell | `public/sw.js` |
 
@@ -42,20 +43,26 @@ Budget numbers live only in `lib/config.ts` and come from env:
 - Neon's HTTP driver means there's no connection pool to exhaust under serverless fan-out.
 - Storage sits behind `StorageProvider` (`lib/storage/`). Another store means one new file plus `STORAGE_PROVIDER=…`. No external storage is wired in now.
 
-## Setup (Vercel)
-1. Import the repo in Vercel (framework: Next.js).
-2. **Storage → Create → Blob** (public). This sets `BLOB_READ_WRITE_TOKEN`.
-3. **Storage → Marketplace → Neon** (free). This sets `DATABASE_URL` (+ `DATABASE_URL_UNPOOLED`).
-4. Add the env var `JWT_SECRET` (`openssl rand -base64 32`), and optionally `PLAN`.
-5. Locally:
-   ```bash
-   npm i
-   vercel env pull .env.local
-   npm run db:migrate                    # creates the tables
-   APP_URL=https://<app>.vercel.app npm run seed -- noa-itay-7f3k "החתונה של נועה ואיתי" [pin]
-   ```
-   The seed command prints the guest URL, the admin URL and an admin key, which is shown once.
-6. Open `/admin/<slug>`, sign in, and download the QR code for printing.
+## Setup (Vercel), phone only
+1. On vercel.com: **Add New → Project →** import this repo (framework: Next.js).
+2. Project **Storage** tab → **Create → Blob** (public). This adds `BLOB_READ_WRITE_TOKEN`.
+3. **Storage → Marketplace → Neon** (free). This adds `DATABASE_URL`.
+4. **Settings → Environment Variables**, add two long random strings (a password generator works):
+   - `JWT_SECRET`
+   - `SETUP_KEY` (12+ characters)
+5. **Deployments → ⋯ → Redeploy**, so the new variables take effect.
+6. Open `https://<app>.vercel.app/setup` and enter the setup key, event name, link name and optional PIN.
+   This creates the tables and the event, then shows the guest link, the admin link and the **admin key (shown once, save it)**.
+7. Open `/admin/<slug>`, sign in with the admin key, and download the QR code.
+
+<details><summary>Same thing from a computer</summary>
+
+```bash
+npm i && vercel env pull .env.local
+npm run db:migrate
+APP_URL=https://<app>.vercel.app npm run seed -- <slug> "<event name>" [pin]
+```
+</details>
 
 ## Development
 ```bash
