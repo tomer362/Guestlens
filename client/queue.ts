@@ -2,7 +2,7 @@
 import Dexie, { type Table } from "dexie";
 import type { UploadTicket } from "@/lib/storage/provider";
 import { compressPhoto } from "./compress/photo";
-import { compressVideo, PausedError, posterFrame, posterFromMp4, VideoError } from "./compress/video";
+import { compressVideo, PausedError, posterFrame, posterFromVideo, VideoError } from "./compress/video";
 import { sha256Hex } from "./hash";
 import { uploadWithTicket } from "./upload";
 import { ensureJoined } from "./session";
@@ -98,6 +98,10 @@ async function prepare(it: QueueItem): Promise<Partial<QueueItem>> {
       width: main.width, height: main.height, sha256: await sha256Hex(main.blob),
     };
   }
+  // Poster first, from the original: the list shows the real frame right away,
+  // and it doesn't depend on the conversion succeeding.
+  const early = await posterFromVideo(src).catch(() => null) ?? await posterFrame(src).catch(() => null);
+  if (early) await qdb().items.update(it.id!, { thumb: early.thumb.blob, thumbType: early.thumb.type, lqip: early.lqip });
   const t0 = performance.now();
   // iOS/Android take the hardware decoder away from background pages ("Decoder failure"):
   // stop cleanly when hidden and resume from the start when the guest comes back.
@@ -112,16 +116,17 @@ async function prepare(it: QueueItem): Promise<Partial<QueueItem>> {
   } finally {
     document.removeEventListener("visibilitychange", onVis);
   }
-  // Prefer a frame decoded from the compressed MP4; fall back to a <video> grab.
-  const fromMp4 = await posterFromMp4(v.blob);
-  const poster = fromMp4 ? null : await posterFrame(v.blob).catch(() => posterFrame(src));
-  const thumb = fromMp4?.thumb ?? poster!.thumb;
-  const lqip = fromMp4 ? fromMp4.lqip : poster?.lqip;
-  const duration = v.duration ?? poster?.duration ?? 0;
+  // if the early poster failed (e.g. undecodable original), try the converted MP4
+  const late = early ? null : (await posterFromVideo(v.blob)) ?? await posterFrame(v.blob).catch(() => null);
+  const poster = early ?? late;
+  if (!poster) throw new Error("poster_failed");
+  const thumb = poster.thumb;
+  const lqip = poster.lqip;
+  const duration = v.duration ?? poster.duration ?? 0;
   if (duration > 181) throw new Rejected("tooLong");
   return {
     file: v.blob, fileType: "video/mp4", thumb: thumb.blob, thumbType: thumb.type, lqip,
-    width: v.width ?? poster?.width, height: v.height ?? poster?.height,
+    width: v.width ?? poster.width, height: v.height ?? poster.height,
     durationS: duration > 0 ? Math.round(duration * 10) / 10 : undefined,
     diag: `${v.diag ?? v.path} · total ${((performance.now() - t0) / 1000).toFixed(0)}s`,
     sha256: await sha256Hex(v.blob),

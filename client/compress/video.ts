@@ -20,13 +20,21 @@ export async function posterFrame(file: Blob): Promise<{ thumb: Encoded; lqip?: 
     // iOS paints nothing until the video has actually played: play muted briefly, then seek.
     await v.play().catch(() => {});
     v.pause();
-    v.currentTime = Math.min(1, (duration || 2) / 2);
-    await new Promise<void>((res) => {
-      const done = () => res();
-      const rvfc = (v as HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => void }).requestVideoFrameCallback;
-      if (rvfc) rvfc.call(v, done); else v.onseeked = done;
-      setTimeout(done, 3000);
-    });
+    const seekTo = async (t: number) => {
+      v.currentTime = t;
+      await new Promise<void>((res) => {
+        const done = () => res();
+        const rvfc = (v as HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => void }).requestVideoFrameCallback;
+        if (rvfc) rvfc.call(v, done); else v.onseeked = done;
+        setTimeout(done, 2000);
+      });
+    };
+    let chosen = false;
+    for (const t of POSTER_TRIES.filter((x) => x < Math.max(0.05, duration - 0.05))) {
+      await seekTo(t);
+      if (frameScore(v, v.videoWidth, v.videoHeight).ok) { chosen = true; break; }
+    }
+    if (!chosen) await seekTo(Math.min(1, duration / 2));
     const { thumb, lqip } = await makeThumbs(v, v.videoWidth, v.videoHeight);
     return { thumb, lqip, duration, width: v.videoWidth, height: v.videoHeight };
   } finally {
@@ -34,27 +42,72 @@ export async function posterFrame(file: Blob): Promise<{ thumb: Encoded; lqip?: 
   }
 }
 
-/** Poster frame decoded by Mediabunny (reliable on iOS, unlike drawing a <video>). */
-export async function posterFromMp4(blob: Blob): Promise<{ thumb: Encoded; lqip?: string } | null> {
+/**
+ * Is this frame worth showing? Rejects black/fade-in frames, blown-out white frames and flat
+ * (motion-blurred / out-of-focus) frames by sampling luma on a 24×24 downscale.
+ */
+function frameScore(src: CanvasImageSource, w: number, h: number): { ok: boolean; score: number } {
+  const c = document.createElement("canvas"); c.width = c.height = 24;
+  const ctx = c.getContext("2d", { willReadFrequently: true })!;
+  ctx.drawImage(src, 0, 0, w, h, 0, 0, 24, 24);
+  const d = ctx.getImageData(0, 0, 24, 24).data;
+  let sum = 0, sq = 0;
+  const n = d.length / 4;
+  for (let i = 0; i < d.length; i += 4) {
+    const y = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    sum += y; sq += y * y;
+  }
+  const mean = sum / n, std = Math.sqrt(Math.max(0, sq / n - mean * mean));
+  return { ok: mean > 28 && mean < 235 && std > 14, score: std - Math.abs(mean - 128) * 0.15 };
+}
+
+/** Timestamps (s from the first frame) we try, in order, for the poster. */
+const POSTER_TRIES = [0, 0.3, 0.7, 1.2, 2, 3.5];
+
+/**
+ * Poster frame decoded with Mediabunny (reliable on iOS, unlike drawing a <video>):
+ * the first "legit" frame among a few early timestamps, or the best-scoring one.
+ */
+export async function posterFromVideo(blob: Blob): Promise<{ thumb: Encoded; lqip?: string; duration: number; width: number; height: number } | null> {
   try {
     const mb = await import("mediabunny");
     const input = new mb.Input({ source: new mb.BlobSource(blob), formats: mb.ALL_FORMATS });
     const track = await input.getPrimaryVideoTrack();
     if (!track || !(await track.canDecode())) return null;
     const dur = await input.computeDuration();
-    const landscape = track.displayWidth >= track.displayHeight;
-    const scale = THUMB_EDGE / Math.min(track.displayWidth, track.displayHeight);
-    const sink = new mb.CanvasSink(track, landscape
-      ? { height: Math.min(track.displayHeight, THUMB_EDGE), width: Math.round(track.displayWidth * Math.min(1, scale)) }
-      : { width: Math.min(track.displayWidth, THUMB_EDGE), height: Math.round(track.displayHeight * Math.min(1, scale)) });
+    const dw = track.displayWidth, dh = track.displayHeight;
+    // decode straight at thumbnail size: short edge = THUMB_EDGE (only ONE dimension, so the aspect is kept)
+    const sink = new mb.CanvasSink(track, dw >= dh
+      ? { height: Math.min(dh, THUMB_EDGE) }
+      : { width: Math.min(dw, THUMB_EDGE) });
     const first = await track.getFirstTimestamp();
-    const frame = await sink.getCanvas(first + Math.min(1, dur / 2));
-    if (!frame) return null;
-    const c = frame.canvas;
-    return await makeThumbs(c, c.width, c.height);
-  } catch {
+    const times = POSTER_TRIES.filter((t) => t < Math.max(0.05, dur - 0.05)).map((t) => first + t);
+    let best: { c: HTMLCanvasElement | OffscreenCanvas; score: number } | null = null;
+    for await (const frame of sink.canvasesAtTimestamps(times)) {
+      if (!frame) continue;
+      const c = frame.canvas;
+      const { ok, score } = frameScore(c, c.width, c.height);
+      if (ok) { best = { c, score }; break; }
+      if (!best || score > best.score) {
+        // keep a copy: the sink may reuse its canvases
+        const copy = document.createElement("canvas"); copy.width = c.width; copy.height = c.height;
+        copy.getContext("2d")!.drawImage(c, 0, 0);
+        best = { c: copy, score };
+      }
+    }
+    if (!best) return null;
+    const { thumb, lqip } = await makeThumbs(best.c, best.c.width, best.c.height);
+    return { thumb, lqip, duration: dur, width: dw, height: dh };
+  } catch (e) {
+    report(`poster mediabunny failed: ${String(e).slice(0, 160)}`);
     return null;
   }
+}
+
+/** @deprecated kept for callers; use posterFromVideo */
+export async function posterFromMp4(blob: Blob) {
+  const r = await posterFromVideo(blob);
+  return r ? { thumb: r.thumb, lqip: r.lqip } : null;
 }
 
 /**
