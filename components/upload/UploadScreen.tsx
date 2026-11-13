@@ -135,7 +135,7 @@ export const UploadScreen = forwardRef<UploadScreenHandle, { slug: string; uploa
           <m.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }}
             className="mt-6 flex items-start gap-2 overflow-hidden rounded-2xl bg-amber-50 p-3 text-sm text-amber-900 ring-1 ring-amber-200">
             {!online ? <CloudOff className="mt-0.5 size-4 shrink-0" aria-hidden /> : <RotateCw className="mt-0.5 size-4 shrink-0 animate-spin" aria-hidden />}
-            <span>{!online ? t.upload.waiting : f(t.upload.pendingBanner, { n: pending })}</span>
+            <span>{!online ? t.upload.waiting : pending === 1 ? t.upload.pendingBannerOne : f(t.upload.pendingBanner, { n: pending })}</span>
           </m.div>
         )}
       </AnimatePresence>
@@ -152,6 +152,9 @@ export const UploadScreen = forwardRef<UploadScreenHandle, { slug: string; uploa
               <Thumb item={it} />
               <div className="min-w-0 flex-1">
                 <p className={`truncate text-sm ${it.status === "rejected" || it.status === "failed" ? "text-rose-deep" : ""}`}>{statusText(it)}</p>
+                {it.error && it.status !== "done" && it.status !== "rejected" && (
+                  <p className="truncate text-[11px] text-muted" dir="ltr" title={it.error}>#{it.attempts} · {it.error}</p>
+                )}
                 {(it.status === "uploading" || it.status === "compressing") && (
                   <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-blush">
                     <m.div className="h-full rounded-full bg-rose" animate={{ width: `${Math.round((it.progress ?? 0.05) * 100)}%` }} />

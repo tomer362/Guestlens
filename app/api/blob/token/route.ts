@@ -28,6 +28,7 @@ export async function POST(req: Request) {
         const type = part === "file" ? m.contentType : thumbTypes.find((t) => pathname === mediaPath(m.eventId, m.id, "thumb", t));
         if (!type || pathname !== mediaPath(m.eventId, m.id, part, type)) throw new Error("bad_path");
 
+        console.info("[blob/token] issue", { mediaId, part, type, max: part === "file" ? m.bytes : m.thumbBytes });
         return {
           allowedContentTypes: [type],
           // exactly what was reserved, so the budget can't be gamed
@@ -45,6 +46,7 @@ export async function POST(req: Request) {
     });
     return json(res);
   } catch (e) {
+    console.error("[blob/token] error", (e as Error).message);
     return err(400, (e as Error).message || "token_error");
   }
 }

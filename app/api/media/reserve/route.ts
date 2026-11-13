@@ -32,7 +32,7 @@ export async function POST(req: Request) {
   const g = await getGuest();
   if (!g) return err(401, "no_guest");
   const b = await parse(req, Body);
-  if (!b) return err(400, "bad_request");
+  if (!b) { console.warn("[reserve] bad body"); return err(400, "bad_request"); }
 
   const event = await eventBy("id", g.eid);
   if (!event) return err(404, "not_found");
@@ -72,6 +72,7 @@ export async function POST(req: Request) {
   // Global budget: 2 advanced ops (file + thumb) and the bytes they'll occupy.
   const total = b.bytes + b.thumbBytes;
   const verdict = await consume(total, 2);
+  if (!verdict.ok) console.warn("[reserve] budget", verdict.reason);
   if (!verdict.ok) return json({ rejected: "budget", reason: verdict.reason }, { status: 507 });
 
   const [guest] = await d.select({ n: schema.guests.displayName }).from(schema.guests).where(eq(schema.guests.id, g.gid));
@@ -97,6 +98,7 @@ export async function POST(req: Request) {
     await releaseStorage(total); // lost a race to an identical upload
     return json({ duplicate: true });
   }
+  console.info("[reserve] ok", { mediaId: id, kind: b.kind, bytes: b.bytes, thumbBytes: b.thumbBytes });
   return json({ mediaId: id, tickets: await tickets(event.id, id, b.contentType, b.thumbType) });
 }
 

@@ -65,6 +65,7 @@ export const en = {
     tooBig: "This video is too large for your phone to shrink. Try a shorter clip",
     tooLong: "Videos up to 3 minutes please",
     unsupported: "This file type isn't supported",
+    pendingBannerOne: "1 item is waiting to upload. Keep the app open on Wi-Fi to finish faster.",
     pendingBanner: "{n} items are waiting to upload. Keep the app open on Wi-Fi to finish faster.",
     editName: "Name",
     anonymous: "Guest",

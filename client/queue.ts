@@ -2,7 +2,7 @@
 import Dexie, { type Table } from "dexie";
 import type { UploadTicket } from "@/lib/storage/provider";
 import { compressPhoto } from "./compress/photo";
-import { compressVideo, posterFrame, VideoError } from "./compress/video";
+import { compressVideo, posterFrame, posterFromMp4, VideoError } from "./compress/video";
 import { sha256Hex } from "./hash";
 import { uploadWithTicket } from "./upload";
 import { ensureJoined } from "./session";
@@ -32,6 +32,8 @@ export interface QueueItem {
   attempts: number;
   nextAt: number;
   error?: string;
+  /** which step is running, for diagnostics */
+  stage?: "reserve" | "thumb" | "file";
 }
 
 class QueueDB extends Dexie {
@@ -89,18 +91,27 @@ async function prepare(it: QueueItem): Promise<Partial<QueueItem>> {
       width: main.width, height: main.height, sha256: await sha256Hex(main.blob),
     };
   }
-  const poster = await posterFrame(src);
-  if (poster.duration > 181) throw new Rejected("tooLong");
   const v = await compressVideo(src, (p) => qdb().items.update(it.id!, { progress: p * 0.5 }));
+  // Prefer a frame decoded from the compressed MP4; fall back to a <video> grab.
+  const fromMp4 = await posterFromMp4(v.blob);
+  const poster = fromMp4 ? null : await posterFrame(v.blob).catch(() => posterFrame(src));
+  const thumb = fromMp4 ?? poster!.thumb;
+  const duration = v.duration ?? poster?.duration ?? 0;
+  if (duration > 181) throw new Rejected("tooLong");
   return {
-    file: v.blob, fileType: "video/mp4", thumb: poster.thumb.blob, thumbType: poster.thumb.type,
-    width: v.width ?? poster.width, height: v.height ?? poster.height, durationS: poster.duration,
+    file: v.blob, fileType: "video/mp4", thumb: thumb.blob, thumbType: thumb.type,
+    width: v.width ?? poster?.width, height: v.height ?? poster?.height,
+    durationS: duration > 0 ? Math.round(duration * 10) / 10 : undefined,
     sha256: await sha256Hex(v.blob),
   };
 }
 
 async function post(url: string, body: unknown) {
-  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  // iOS can leave a request pending forever after the screen locks: always time out.
+  const r = await fetch(url, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    signal: AbortSignal.timeout?.(20_000),
+  });
   const j = await r.json().catch(() => ({}));
   return { status: r.status, ok: r.ok, j };
 }
@@ -120,6 +131,7 @@ async function processOne(it: QueueItem) {
     // 2. reserve
     await db.items.update(id, { status: "uploading" });
     if (!it.mediaId || !it.tickets) {
+      await db.items.update(id, { stage: "reserve" });
       const body = {
         sha256: it.sha256, kind: it.kind, contentType: it.fileType, bytes: it.file!.size,
         thumbType: it.thumbType, thumbBytes: it.thumb!.size, width: it.width, height: it.height,
@@ -129,17 +141,19 @@ async function processOne(it: QueueItem) {
       if (r.status === 401) { await ensureJoined(it.slug, true); r = await post("/api/media/reserve", body); }
       if (r.j.duplicate) { await db.items.update(id, { status: "duplicate", file: undefined, progress: 1 }); return; }
       if (r.j.rejected) throw new Rejected(r.j.rejected);
-      if (!r.ok) throw new Error(`reserve_${r.status}`);
+      if (!r.ok) throw new Error(`reserve_${r.status}${r.j.error ? `:${r.j.error}` : ""}`);
       it.mediaId = r.j.mediaId; it.tickets = r.j.tickets;
       await db.items.update(id, { mediaId: it.mediaId, tickets: it.tickets });
     }
 
     // 3. upload directly to storage (thumb first: it's tiny and makes the gallery look alive)
     if (!it.thumbUrl) {
+      await db.items.update(id, { stage: "thumb" });
       it.thumbUrl = await uploadWithTicket(it.tickets!.thumb, it.thumb!);
       await db.items.update(id, { thumbUrl: it.thumbUrl });
     }
     if (!it.fileUrl) {
+      await db.items.update(id, { stage: "file" });
       const start = it.kind === "video" ? 0.5 : 0;
       it.fileUrl = await uploadWithTicket(it.tickets!.file, it.file!, (f) => {
         db.items.update(id, { progress: start + f * (1 - start) });
@@ -154,7 +168,7 @@ async function processOne(it: QueueItem) {
       await db.items.update(id, { mediaId: undefined, tickets: undefined, fileUrl: undefined, thumbUrl: undefined });
       throw new Error("expired");
     }
-    if (!c.ok) throw new Error(`complete_${c.status}`);
+    if (!c.ok) throw new Error(`complete_${c.status}${c.j.error ? `:${c.j.error}` : ""}`);
     await db.items.update(id, { status: "done", progress: 1, file: undefined, tickets: undefined });
   } catch (e) {
     if (e instanceof Rejected || e instanceof VideoError) {
@@ -167,11 +181,12 @@ async function processOne(it: QueueItem) {
       }
       return;
     }
+    console.warn("[guestlens] upload failed", it.stage, e);
     const attempts = it.attempts + 1;
     const offline = typeof navigator !== "undefined" && !navigator.onLine;
     await db.items.update(id, {
       status: attempts > 12 ? "failed" : "waiting",
-      error: offline ? "offline" : String((e as Error).message ?? e),
+      error: offline ? "offline" : `${(await db.items.get(id))?.stage ?? "prepare"}: ${String((e as Error).message ?? e)}`.slice(0, 160),
       attempts, nextAt: Date.now() + backoff(attempts),
     });
   }

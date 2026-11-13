@@ -15,7 +15,10 @@ export async function POST(req: Request) {
   if (!b) return err(400, "bad_request");
 
   const s = storage();
-  if (!s.ownsUrl(b.url, g.eid, b.mediaId) || !s.ownsUrl(b.thumbUrl, g.eid, b.mediaId)) return err(400, "bad_url");
+  if (!s.ownsUrl(b.url, g.eid, b.mediaId) || !s.ownsUrl(b.thumbUrl, g.eid, b.mediaId)) {
+    console.warn("[complete] bad_url", b.url, b.thumbUrl);
+    return err(400, "bad_url");
+  }
 
   const [m] = await db().select({ status: schema.media.status }).from(schema.media)
     .where(and(eq(schema.media.id, b.mediaId), eq(schema.media.guestId, g.gid))).limit(1);
@@ -25,6 +28,7 @@ export async function POST(req: Request) {
 
   await db().update(schema.media).set({ url: b.url, thumbUrl: b.thumbUrl })
     .where(eq(schema.media.id, b.mediaId));
-  await markReadyIfComplete(b.mediaId);
+  const ready = await markReadyIfComplete(b.mediaId);
+  console.info("[complete]", { mediaId: b.mediaId, ready });
   return json({ ok: true });
 }
