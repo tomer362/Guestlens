@@ -39,10 +39,6 @@ export async function canTranscode(): Promise<boolean> {
   return canEncodeVideo("avc", { width: 1920, height: 1080, bitrate: 2_500_000 }).catch(() => false);
 }
 
-/**
- * Re-encode to MP4 / H.264 ≤1080p ~2.5 Mbps + AAC 96 kbps (~15 MB per 45 s), on the phone.
- * Mediabunny is loaded lazily, so photo-only guests never download it.
- */
 /** Poster frame decoded by Mediabunny (reliable on iOS, unlike drawing a <video>). */
 export async function posterFromMp4(blob: Blob): Promise<Encoded | null> {
   try {
@@ -63,9 +59,25 @@ export async function posterFromMp4(blob: Blob): Promise<Encoded | null> {
   }
 }
 
-export async function compressVideo(file: Blob, onProgress?: (p: number) => void): Promise<{ blob: Blob; width?: number; height?: number; duration?: number }> {
+/** Above this the clip is worth re-encoding; below it we keep the original stream untouched. */
+const KEEP_BITRATE = 5_000_000;
+const TARGET_BITRATE = 2_500_000;
+
+export type VideoPath = "original" | "remux" | "transcode";
+
+/**
+ * Make the video upload-ready as cheaply as possible, without losing quality:
+ *  1. "original"  H.264 MP4, ≤1080p, ≤5 Mbps: upload the file as-is (instant).
+ *  2. "remux"     same stream in a .mov/other container: copy packets into MP4 (seconds, lossless).
+ *  3. "transcode" HEVC / 4K / high bitrate: re-encode video to H.264 ≤1080p ~2.5 Mbps with
+ *                 hardware acceleration. Audio is always copied, never re-encoded.
+ * Mediabunny is loaded lazily, so photo-only guests never download it.
+ */
+export async function compressVideo(
+  file: Blob, onProgress?: (p: number) => void,
+): Promise<{ blob: Blob; width?: number; height?: number; duration?: number; path: VideoPath }> {
   if (!(await canTranscode())) {
-    if (file.type === "video/mp4" && file.size <= LIMITS.rawVideoMaxBytes) return { blob: file };
+    if (file.type === "video/mp4" && file.size <= LIMITS.rawVideoMaxBytes) return { blob: file, path: "original" };
     throw new VideoError("tooBig");
   }
   const mb = await import("mediabunny");
@@ -73,28 +85,57 @@ export async function compressVideo(file: Blob, onProgress?: (p: number) => void
   const duration = await input.computeDuration();
   if (duration > LIMITS.maxVideoSeconds + 1) throw new VideoError("tooLong");
   const track = await input.getPrimaryVideoTrack();
-  const landscape = track ? track.displayWidth >= track.displayHeight : true;
+  const w = track?.displayWidth ?? 0, h = track?.displayHeight ?? 0;
+  const shortEdge = Math.min(w, h) || 1080;
+  const bitrate = duration > 0 ? (file.size * 8) / duration : Infinity;
+  const fitsAsIs = track?.codec === "avc" && shortEdge <= 1080 && bitrate <= KEEP_BITRATE
+    && file.size <= LIMITS.video.maxBytes;
 
-  const target = new mb.BufferTarget();
-  const output = new mb.Output({ format: new mb.Mp4OutputFormat({ fastStart: "in-memory" }), target });
-  const conv = await mb.Conversion.init({
-    input, output,
-    video: {
-      codec: "avc", bitrate: 2_500_000, keyFrameInterval: 2,
-      // cap the short edge at 1080 (portrait phone videos stay portrait)
-      ...(landscape ? { height: Math.min(1080, track?.displayHeight ?? 1080) } : { width: Math.min(1080, track?.displayWidth ?? 1080) }),
-    },
-    audio: { codec: "aac", bitrate: 96_000 },
-  });
-  if (!conv.isValid) {
-    if (file.type === "video/mp4" && file.size <= LIMITS.rawVideoMaxBytes) return { blob: file };
-    throw new VideoError("unsupported");
+  if (fitsAsIs && file.type === "video/mp4") {
+    onProgress?.(1);
+    return { blob: file, width: w, height: h, duration, path: "original" };
   }
-  conv.onProgress = (p) => onProgress?.(p);
-  await conv.execute();
-  const buf = target.buffer;
+
+  const landscape = w >= h;
+  const t0 = performance.now();
+  // Try the hardware encoder first (much faster on phones); some devices reject that
+  // configuration, so fall back to the browser's default choice.
+  let buf: ArrayBuffer | null = null;
+  for (const hardwareAcceleration of ["prefer-hardware", "no-preference"] as const) {
+    const target = new mb.BufferTarget();
+    const output = new mb.Output({ format: new mb.Mp4OutputFormat({ fastStart: "in-memory" }), target });
+    const input2 = new mb.Input({ source: new mb.BlobSource(file), formats: mb.ALL_FORMATS });
+    const conv = await mb.Conversion.init({
+      input: input2, output,
+      // fitsAsIs → no video options → packets are copied (lossless, fast)
+      video: fitsAsIs ? undefined : {
+        codec: "avc", bitrate: TARGET_BITRATE, keyFrameInterval: 2, hardwareAcceleration,
+        // cap the short edge at 1080 (portrait phone videos stay portrait)
+        ...(shortEdge > 1080 ? (landscape ? { height: 1080 } : { width: 1080 }) : {}),
+      },
+      // no audio options → the phone's AAC track is copied as-is
+    });
+    if (!conv.isValid) {
+      if (hardwareAcceleration === "prefer-hardware" && !fitsAsIs) continue;
+      if (file.type === "video/mp4" && file.size <= LIMITS.rawVideoMaxBytes) return { blob: file, path: "original" };
+      throw new VideoError("unsupported");
+    }
+    conv.onProgress = (p) => onProgress?.(p);
+    try {
+      await conv.execute();
+      buf = target.buffer;
+      break;
+    } catch (e) {
+      if (hardwareAcceleration === "prefer-hardware" && !fitsAsIs) { console.warn("[guestlens] HW encode failed, retrying", e); continue; }
+      throw e;
+    }
+  }
   if (!buf) throw new VideoError("unsupported");
   const blob = new Blob([buf], { type: "video/mp4" });
+  console.info("[guestlens] video", fitsAsIs ? "remux" : "transcode", {
+    seconds: Math.round(duration), inMB: +(file.size / 1e6).toFixed(1), outMB: +(blob.size / 1e6).toFixed(1),
+    tookS: +((performance.now() - t0) / 1000).toFixed(1), codec: track?.codec, w, h,
+  });
   if (blob.size > LIMITS.video.maxBytes) throw new VideoError("tooBig");
-  return { blob, width: track?.displayWidth, height: track?.displayHeight, duration };
+  return { blob, width: w, height: h, duration, path: fitsAsIs ? "remux" : "transcode" };
 }

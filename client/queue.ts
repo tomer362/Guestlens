@@ -202,14 +202,26 @@ async function loop() {
     const db = qdb();
     // items left "in progress" by a closed tab are resumed
     await db.items.where("status").anyOf("compressing", "uploading").modify({ status: "queued" });
+    // Two lanes: one video at a time (heavy) next to up to CONCURRENCY photos,
+    // so photos never wait behind a long video conversion.
+    const inFlight = new Map<number, { kind: QueueItem["kind"]; p: Promise<void> }>();
     for (;;) {
       const now = Date.now();
-      const ready = await db.items.where("status").anyOf(ACTIVE)
-        .filter((i) => i.nextAt <= now).sortBy("createdAt");
-      if (!ready.length) break;
-      // compression is CPU/memory heavy: do videos one at a time
-      const batch = ready[0].kind === "video" ? [ready[0]] : ready.filter((i) => i.kind === "photo").slice(0, CONCURRENCY);
-      await Promise.all(batch.map(processOne));
+      const ready = (await db.items.where("status").anyOf(ACTIVE).filter((i) => i.nextAt <= now).sortBy("createdAt"))
+        .filter((i) => !inFlight.has(i.id!));
+      const busy = [...inFlight.values()];
+      const freeVideo = busy.some((x) => x.kind === "video") ? 0 : 1;
+      const freePhotos = CONCURRENCY - busy.filter((x) => x.kind === "photo").length;
+      const start = [
+        ...ready.filter((i) => i.kind === "video").slice(0, freeVideo),
+        ...ready.filter((i) => i.kind === "photo").slice(0, Math.max(0, freePhotos)),
+      ];
+      for (const it of start) {
+        const p = processOne(it).finally(() => inFlight.delete(it.id!));
+        inFlight.set(it.id!, { kind: it.kind, p });
+      }
+      if (!inFlight.size) break;
+      await Promise.race([...inFlight.values()].map((x) => x.p));
     }
     await gc();
     const next = await db.items.where("status").anyOf(ACTIVE).toArray();
