@@ -106,18 +106,80 @@ export async function makeThumbs(src: CanvasImageSource, sw: number, sh: number)
   return { thumb, lqip };
 }
 
+export class DecodeError extends Error { constructor() { super("decode_failed"); } }
+
+type Decoded = { src: CanvasImageSource; w: number; h: number; close: () => void };
+
+const looksHeic = (f: Blob) => /hei[cf]/i.test(f.type) || /\.hei[cf]$/i.test((f as File).name ?? "");
+
+async function viaImg(blob: Blob): Promise<Decoded> {
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  img.decoding = "async";
+  img.src = url;
+  try {
+    await (img.decode ? img.decode() : new Promise((res, rej) => { img.onload = res; img.onerror = rej; }));
+  } catch (e) {
+    URL.revokeObjectURL(url);
+    throw e;
+  }
+  // <img> applies EXIF orientation in every current browser
+  return { src: img, w: img.naturalWidth, h: img.naturalHeight, close: () => URL.revokeObjectURL(url) };
+}
+
 /**
- * 16 MP phone photo (~6.5 MB) → 2048 px WebP q75 (~600 KB) + 400 px thumb.
- * Re-encoding drops EXIF/GPS. createImageBitmap applies EXIF orientation.
+ * Decode any picked photo, most capable path first:
+ *  1. createImageBitmap with EXIF orientation      (all current browsers)
+ *  2. createImageBitmap without options            (older Safari rejects the options bag)
+ *  3. <img> + decode()                             (anything the browser can display)
+ *  4. HEIC/HEIF → WASM decoder, loaded only here   (Chrome/Firefox/Samsung can't decode
+ *                                                    Samsung "high efficiency" photos)
+ */
+/** Minimal OffscreenCanvas stand-in (older Firefox) for the HEIC decoder; real one is used when present. */
+function ensureOffscreenCanvas() {
+  const g = globalThis as { OffscreenCanvas?: unknown };
+  if (typeof g.OffscreenCanvas !== "undefined" || typeof document === "undefined") return;
+  g.OffscreenCanvas = function (w: number, h: number) {
+    const c = document.createElement("canvas") as HTMLCanvasElement & { convertToBlob?: (o?: { type?: string; quality?: number }) => Promise<Blob> };
+    c.width = w; c.height = h;
+    c.convertToBlob = (o) => new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error("toBlob failed"))), o?.type, o?.quality));
+    return c;
+  };
+}
+
+async function decodePhoto(file: Blob): Promise<Decoded> {
+  const bmp = (b: ImageBitmap): Decoded => ({ src: b, w: b.width, h: b.height, close: () => b.close() });
+  if (typeof createImageBitmap === "function") {
+    try { return bmp(await createImageBitmap(file, { imageOrientation: "from-image" })); } catch {}
+    try { return bmp(await createImageBitmap(file)); } catch {}
+  }
+  try { return await viaImg(file); } catch {}
+  if (looksHeic(file)) {
+    try {
+      ensureOffscreenCanvas(); // heic-to draws on `new OffscreenCanvas(...)`
+      const { heicTo } = await import("heic-to/next");
+      const jpeg = await heicTo({ blob: file, type: "image/jpeg", quality: 0.92 });
+      if (typeof createImageBitmap === "function") {
+        try { return bmp(await createImageBitmap(jpeg)); } catch {}
+      }
+      return await viaImg(jpeg);
+    } catch {}
+  }
+  throw new DecodeError();
+}
+
+/**
+ * 16 MP phone photo (~6.5 MB) → 2048 px WebP q75 (~600 KB) + 360 px square thumb.
+ * Re-encoding drops EXIF/GPS; orientation is applied while decoding.
  */
 export async function compressPhoto(file: Blob): Promise<{ main: Encoded; thumb: Encoded; lqip?: string }> {
-  const bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+  const d = await decodePhoto(file);
   try {
-    const main = await encodeScaled(bmp, bmp.width, bmp.height, MAX_EDGE);
-    const { thumb, lqip } = await makeThumbs(bmp, bmp.width, bmp.height);
+    const main = await encodeScaled(d.src, d.w, d.h, MAX_EDGE);
+    const { thumb, lqip } = await makeThumbs(d.src, d.w, d.h);
     return { main, thumb, lqip };
   } finally {
-    bmp.close();
+    d.close();
   }
 }
 

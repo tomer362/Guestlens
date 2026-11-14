@@ -12,6 +12,15 @@ const UA = {
   iosFacebook: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 [FBAN/FBIOS;FBAV/490.0]",
   androidFirefox: "Mozilla/5.0 (Android 14; Mobile; rv:132.0) Gecko/132.0 Firefox/132.0",
   desktopChrome: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  edgeAndroid: "Mozilla/5.0 (Linux; Android 14; SM-S921B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36 EdgA/131.0.2903.87",
+  edgeDesktop: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.2903.86",
+  operaAndroid: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36 OPR/86.0.0.0",
+  firefoxIos: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/133.0 Mobile/15E148 Safari/605.1.15",
+  edgeIos: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 EdgiOS/131.0.2903.92 Mobile/15E148 Safari/605.1.15",
+  firefoxDesktop: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
+  macSafari: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15",
+  androidTelegram: "Mozilla/5.0 (Linux; Android 14; Pixel 8; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/131.0.0.0 Mobile Safari/537.36 Telegram-Android/11.4.2",
+  iosTikTok: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 musical_ly_37.5.0 BytedanceWebview/d8a21c6",
 };
 const d = (ua: string, extra: Partial<Parameters<typeof detectPlatform>[0]> = {}) => detectPlatform({ ua, standalone: false, ...extra });
 
@@ -27,6 +36,15 @@ describe("detectPlatform", () => {
   it("Facebook iOS → in-app", () => expect(d(UA.iosFacebook).inAppName).toBe("Facebook"));
   it("Firefox Android → manual", () => expect(d(UA.androidFirefox).path).toBe("manual"));
   it("desktop Chrome → prompt", () => expect(d(UA.desktopChrome)).toMatchObject({ path: "prompt", os: "desktop" }));
+  it("Edge Android → prompt", () => expect(d(UA.edgeAndroid)).toMatchObject({ path: "prompt", os: "android" }));
+  it("Edge desktop → prompt", () => expect(d(UA.edgeDesktop)).toMatchObject({ path: "prompt", os: "desktop" }));
+  it("Opera Android → prompt (Chromium)", () => expect(d(UA.operaAndroid).path).toBe("prompt"));
+  it("Firefox iOS → share-sheet in address bar", () => expect(d(UA.firefoxIos).path).toBe("ios-other"));
+  it("Edge iOS → share-sheet in address bar", () => expect(d(UA.edgeIos).path).toBe("ios-other"));
+  it("Firefox desktop → manual", () => expect(d(UA.firefoxDesktop)).toMatchObject({ path: "manual", os: "desktop" }));
+  it("Mac Safari → manual", () => expect(d(UA.macSafari)).toMatchObject({ path: "manual", os: "desktop" }));
+  it("Telegram Android webview → in-app", () => expect(d(UA.androidTelegram)).toMatchObject({ path: "in-app", inAppName: "Telegram" }));
+  it("TikTok iOS → in-app", () => expect(d(UA.iosTikTok)).toMatchObject({ path: "in-app", inAppName: "TikTok" }));
   it("standalone wins over everything", () => expect(detectPlatform({ ua: UA.androidWhatsapp, standalone: true }).path).toBe("standalone"));
   it("builds a Chrome intent URL", () => {
     expect(androidChromeIntent("https://x.app/e/noa?a=1")).toBe(

@@ -70,7 +70,7 @@ export async function prepareVideo(file: Blob, hooks: CoreHooks = {}): Promise<V
   const canFallBackToOriginal = (isAvc || track?.codec === "hevc") && containerOk && file.size <= LIMITS.video.maxBytes;
   const original = () => (file.type ? file : new Blob([file], { type: origType }));
 
-  const src = `${track?.codec ?? "?"} ${w}x${h} ${Math.round(fps)}fps ${(bitrate / 1e6).toFixed(1)}Mbps ${Math.round(duration)}s ${(file.size / 1e6).toFixed(0)}MB audio=${audio?.codec ?? "none"}`;
+  const src = `${track?.codec ?? "?"} ${w}x${h} ${Math.round(fps)}fps ${(bitrate / 1e6).toFixed(1)}Mbps ${Math.round(duration)}s ${(file.size / 1e6).toFixed(0)}MB audio=${(await input.getAudioTracks()).map((t) => t.codec ?? "?").join("+") || "none"}`;
   report(`video probed @${el()} ${src} fitsAsIs=${fitsAsIs}`);
   hooks.info?.(src);
 

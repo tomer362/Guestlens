@@ -4,7 +4,7 @@ import { AnimatePresence, m } from "motion/react";
 import { liveQuery } from "dexie";
 import { Camera, Check, CloudOff, ImagePlus, Lock, Pencil, RotateCw, Video, X } from "lucide-react";
 import { useI18n } from "@/lib/i18n/client";
-import { enqueue, getBlob, qdb, removeItem, retry, type QueueItem } from "@/client/queue";
+import { enqueue, ensureDb, getBlob, qdb, removeItem, retry, type QueueItem } from "@/client/queue";
 import { savedName, updateName } from "@/client/session";
 
 export interface UploadScreenHandle { openCamera(): void; }
@@ -12,9 +12,14 @@ export interface UploadScreenHandle { openCamera(): void; }
 function useQueue(slug: string) {
   const [items, setItems] = useState<QueueItem[]>([]);
   useEffect(() => {
-    const sub = liveQuery(() => qdb().items.where("slug").equals(slug).reverse().sortBy("createdAt"))
-      .subscribe({ next: setItems, error: () => {} });
-    return () => sub.unsubscribe();
+    let sub: { unsubscribe(): void } | null = null, gone = false;
+    // wait for the real (or in-memory fallback) database before subscribing
+    ensureDb().then(() => {
+      if (gone) return;
+      sub = liveQuery(() => qdb().items.where("slug").equals(slug).reverse().sortBy("createdAt"))
+        .subscribe({ next: setItems, error: () => {} });
+    });
+    return () => { gone = true; sub?.unsubscribe(); };
   }, [slug]);
   return items;
 }

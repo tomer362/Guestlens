@@ -73,6 +73,19 @@ npm run icons        # re-render public/icons from scripts/icon.svg
 ```
 `GL_DEMO=1 npm start` serves the demo event from a production build.
 
+## Browser support (what each guest's browser does)
+| Browser | Photos | Videos |
+|---|---|---|
+| Safari / any iOS browser 16.4+ | compressed (WebP or JPEG) | converted on the phone, or the original .mov/.mp4 is uploaded |
+| Chrome / Edge / Samsung / Opera (Android, desktop) | compressed; HEIC through a lazy WASM decoder | converted (hardware when available) |
+| Firefox desktop 130+ | compressed; HEIC through the WASM decoder | converted if an H.264 encoder exists, otherwise the original (≤ 60 MB) |
+| Firefox Android, iOS < 16.4 | compressed | no WebCodecs: original MP4/MOV ≤ 60 MB, larger ones refused with a message |
+| In-app browsers (WhatsApp, Instagram…) / Chrome on iOS | as above | as above; files kept in memory when IndexedDB can't hold them |
+| Private mode without IndexedDB | in-memory queue for the visit | same |
+
+- Syntax floor: ES2022 (iOS/Safari 15+). Check it with `npm run build && npm run check:es`.
+- The compatibility harness (Playwright profiles that remove or break APIs in Chromium) lives outside the repo. Real-device spot checks are still recommended before the event.
+
 ## Known v1 limits
 - Hidden items disappear from guests' galleries on their next full load, not instantly.
 - Phones without WebCodecs upload the original MP4 as-is if it's ≤ 50 MB; anything else is refused.

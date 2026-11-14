@@ -1,7 +1,7 @@
 "use client";
 import Dexie, { type Table } from "dexie";
 import type { UploadTicket } from "@/lib/storage/provider";
-import { compressPhoto } from "./compress/photo";
+import { compressPhoto, DecodeError } from "./compress/photo";
 import { compressVideo, PausedError, posterFrame, posterFromVideo, VideoError } from "./compress/video";
 import { sha256Hex } from "./hash";
 import { uploadWithTicket } from "./upload";
@@ -58,8 +58,8 @@ type BlobPart = "original" | "file" | "thumb";
 class QueueDB extends Dexie {
   items!: Table<QueueItem, number>;
   blobs!: Table<{ key: string; blob: Blob }, string>;
-  constructor() {
-    super("guestlens");
+  constructor(deps?: ConstructorParameters<typeof Dexie>[1]) {
+    super("guestlens", deps);
     this.version(1).stores({ items: "++id, slug, status, nextAt, createdAt" });
     // v2: files move out of the item records. Old in-record blobs are dropped (they were exactly
     // what broke on Chrome iOS); unfinished old items will ask to be picked again.
@@ -74,6 +74,25 @@ class QueueDB extends Dexie {
 }
 let _db: QueueDB | null = null;
 export const qdb = () => (_db ??= new QueueDB());
+
+/**
+ * Open the queue database; where IndexedDB is unavailable (some private modes and embedded
+ * webviews) swap in an in-memory implementation, so uploads still work during this visit.
+ */
+let dbReady: Promise<void> | null = null;
+export function ensureDb(): Promise<void> {
+  return (dbReady ??= (async () => {
+    try {
+      if (typeof indexedDB === "undefined") throw new Error("no indexedDB");
+      await qdb().open();
+    } catch (e) {
+      const fake = await import("fake-indexeddb");
+      _db = new QueueDB({ indexedDB: fake.indexedDB, IDBKeyRange: fake.IDBKeyRange });
+      await _db.open();
+      diag(`indexedDB unavailable → in-memory queue: ${String((e as Error)?.message ?? e).slice(0, 120)}`);
+    }
+  })());
+}
 
 // ---------- file storage: memory first, IndexedDB best-effort (to resume after a reload) ----------
 const mem = new Map<string, Blob>();
@@ -154,9 +173,14 @@ class LostLease extends Error { constructor() { super("lost_lease"); } }
 
 export async function enqueue(slug: string, files: File[]) {
   const now = Date.now();
-  const picked = files.filter((f) => f.type.startsWith("image/") || f.type.startsWith("video/"));
+  // some browsers give HEIC/MOV files an empty MIME type: fall back to the extension
+  const kindOf = (f: File): QueueItem["kind"] | null =>
+    f.type.startsWith("video/") || /\.(mov|mp4|m4v|3gp|webm|mkv)$/i.test(f.name) ? "video"
+    : f.type.startsWith("image/") || /\.(jpe?g|png|webp|gif|hei[cf]|avif|dng)$/i.test(f.name) ? "photo" : null;
+  await ensureDb();
+  const picked = files.filter((f) => kindOf(f));
   const items: QueueItem[] = picked.map((f, i) => ({
-    slug, kind: f.type.startsWith("video/") ? "video" : "photo", status: "queued",
+    slug, kind: kindOf(f)!, status: "queued",
     createdAt: now + i, name: f.name, attempts: 0, nextAt: 0,
   }));
   const ids = (await qdb().items.bulkAdd(items, { allKeys: true })) as number[];
@@ -188,11 +212,21 @@ function backoff(attempts: number) {
 
 class Rejected extends Error { constructor(public code: string) { super(code); } }
 
+const looksHeicName = (it: QueueItem) => /\.hei[cf]$/i.test(it.name ?? "");
+
 type Prepared = { file: Blob; thumb: Blob; meta: Partial<QueueItem> };
 async function prepare(it: QueueItem, src: Blob): Promise<Prepared> {
   if (it.kind === "photo") {
     const t0 = performance.now();
-    const { main, thumb, lqip } = await withTimeout(compressPhoto(src), 30_000, "photo");
+    let r: Awaited<ReturnType<typeof compressPhoto>>;
+    try {
+      // 60 s: the first HEIC photo also downloads the WASM decoder
+      r = await withTimeout(compressPhoto(src), looksHeicName(it) ? 60_000 : 30_000, "photo");
+    } catch (e) {
+      if (e instanceof DecodeError) throw new Rejected("unsupported"); // no point retrying 12 times
+      throw e;
+    }
+    const { main, thumb, lqip } = r;
     return { file: main.blob, thumb: thumb.blob, meta: {
       fileType: main.type, thumbType: thumb.type, lqip,
       diag: `photo ${((performance.now() - t0) / 1000).toFixed(1)}s · ${(src.size / 1e6).toFixed(1)}MB → ${(main.blob.size / 1e3).toFixed(0)}KB`,
@@ -411,6 +445,7 @@ async function loop() {
   if (running) { again = true; return; }
   running = true;
   try {
+    await ensureDb();
     const db = qdb();
     // Two lanes: one video at a time per device (heavy) next to up to CONCURRENCY photos,
     // so photos never wait behind a long video conversion.
@@ -468,9 +503,10 @@ export function kick() {
 }
 
 let wired = false;
-export function startQueue() {
+export async function startQueue() {
   if (wired || typeof window === "undefined") return;
   wired = true;
+  await ensureDb();
   diag(`queue start tab=${TAB} ua=${navigator.userAgent.slice(0, 120)}`);
   // evidence for the old bug: was a (frozen) tab still holding the previous cross-tab lock?
   (navigator as Navigator & { locks?: LockManager }).locks?.query?.().then((q) => {
