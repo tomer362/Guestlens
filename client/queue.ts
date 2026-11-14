@@ -143,6 +143,12 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   });
 }
 
+/** Tell the album (this tab and other tabs) that an upload just went live. */
+function announceUploaded() {
+  try { dispatchEvent(new Event("gl:uploaded")); } catch {}
+  try { const bc = new BroadcastChannel("gl"); bc.postMessage("gl:uploaded"); bc.close(); } catch {}
+}
+
 /** Thrown when another tab took this item over (we were frozen past our lease). */
 class LostLease extends Error { constructor() { super("lost_lease"); } }
 
@@ -327,6 +333,7 @@ async function processOne(it: QueueItem) {
     }
     if (!c.ok) throw new Error(`complete_${c.status}${c.j.error ? `:${c.j.error}` : ""}`);
     if (it.kind === "video") diag(`video uploaded ${((Date.now() - upStart) / 1000).toFixed(0)}s · ${it.diag ?? ""}`);
+    announceUploaded();
     await delBlobs(id, ["original", "file"]); // keep the small thumb for the list
     await db.items.update(id, { status: "done", progress: 1, tickets: undefined,
       diag: `${it.diag ?? ""} · upload ${((Date.now() - upStart) / 1000).toFixed(0)}s` });

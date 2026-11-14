@@ -1,5 +1,5 @@
 "use client";
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, m } from "motion/react";
 import { liveQuery } from "dexie";
 import { Camera, Check, CloudOff, ImagePlus, Lock, Pencil, RotateCw, Video, X } from "lucide-react";
@@ -44,7 +44,7 @@ function Thumb({ item }: { item: QueueItem }) {
   );
 }
 
-export const UploadScreen = forwardRef<UploadScreenHandle, { slug: string; uploadOpen: boolean }>(function UploadScreen({ slug, uploadOpen }, ref) {
+export function UploadScreen({ slug, uploadOpen, onHandle }: { slug: string; uploadOpen: boolean; onHandle?: (h: UploadScreenHandle) => void }) {
   const { t, f } = useI18n();
   const photoIn = useRef<HTMLInputElement>(null);
   const videoIn = useRef<HTMLInputElement>(null);
@@ -57,7 +57,7 @@ export const UploadScreen = forwardRef<UploadScreenHandle, { slug: string; uploa
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 5000); return () => clearInterval(t); }, []);
 
-  useImperativeHandle(ref, () => ({ openCamera: () => photoIn.current?.click() }));
+  useEffect(() => { onHandle?.({ openCamera: () => photoIn.current?.click() }); }, [onHandle]);
   useEffect(() => {
     setName(savedName());
     const n = () => setName(savedName());
@@ -192,4 +192,4 @@ export const UploadScreen = forwardRef<UploadScreenHandle, { slug: string; uploa
       {items.length === 0 && <p className="mt-10 text-center text-muted">{t.upload.queueEmpty}</p>}
     </div>
   );
-});
+}

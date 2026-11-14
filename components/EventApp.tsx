@@ -1,30 +1,38 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { AnimatePresence, m } from "motion/react";
 import { Camera, CircleHelp, Download, Images, X } from "lucide-react";
-import { InstallGuide } from "./onboarding/InstallGuide";
+import dynamic from "next/dynamic";
 import { useI18n } from "@/lib/i18n/client";
 import { LangToggle } from "./LangToggle";
-import { Onboarding, hasOnboarded } from "./onboarding/Onboarding";
-import { UploadScreen, type UploadScreenHandle } from "./upload/UploadScreen";
-import { Gallery } from "./gallery/Gallery";
+import { hasOnboarded } from "./onboarding/flag";
+import type { UploadScreenHandle } from "./upload/UploadScreen";
 import { ensureJoined } from "@/client/session";
-import { startQueue } from "@/client/queue";
 import { isStandalone } from "@/lib/pwa/install";
+
+// Each view only downloads what it shows: the album page never loads the compression/queue UI,
+// the upload page never loads the viewer, and the onboarding + install guide load on demand.
+const Loading = () => <div className="grid min-h-[50vh] place-items-center"><span className="size-8 animate-spin rounded-full border-2 border-rose border-t-transparent" /></div>;
+const UploadScreen = dynamic(() => import("./upload/UploadScreen").then((m) => m.UploadScreen), { loading: Loading });
+const Gallery = dynamic(() => import("./gallery/Gallery").then((m) => m.Gallery), { loading: Loading });
+const Onboarding = dynamic(() => import("./onboarding/Onboarding").then((m) => m.Onboarding), { ssr: false });
+const InstallGuide = dynamic(() => import("./onboarding/InstallGuide").then((m) => m.InstallGuide), { ssr: false });
 
 export function EventApp({ slug, eventName, uploadOpen, view }: { slug: string; eventName: string; uploadOpen: boolean; view: "upload" | "gallery" }) {
   const { t } = useI18n();
   const [onboarding, setOnboarding] = useState<boolean | null>(null);
   const [standalone, setStandalone] = useState(false);
   const [installOpen, setInstallOpen] = useState(false);
-  const uploadRef = useRef<UploadScreenHandle>(null);
+  const uploadRef = useRef<UploadScreenHandle | null>(null);
+  const onUploadHandle = useCallback((h: UploadScreenHandle) => { uploadRef.current = h; }, []);
 
   useEffect(() => {
     setStandalone(isStandalone());
     const forced = new URLSearchParams(location.search).get("help") === "1";
     setOnboarding(forced || !hasOnboarded());
-    ensureJoined(slug).then(() => startQueue());
+    // the upload queue keeps running on every view (uploads continue while browsing the album)
+    ensureJoined(slug).then(() => import("@/client/queue")).then((q) => q.startQueue());
   }, [slug]);
 
   return (
@@ -47,7 +55,7 @@ export function EventApp({ slug, eventName, uploadOpen, view }: { slug: string; 
 
       <main className="flex-1 px-4 pb-28">
         {view === "upload"
-          ? <UploadScreen ref={uploadRef} slug={slug} uploadOpen={uploadOpen} />
+          ? <UploadScreen onHandle={onUploadHandle} slug={slug} uploadOpen={uploadOpen} />
           : <Gallery slug={slug} />}
       </main>
 

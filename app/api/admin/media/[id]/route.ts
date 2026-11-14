@@ -3,6 +3,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { db, schema } from "@/lib/db/client";
 import { getAdmin } from "@/lib/auth";
 import { err, json, parse } from "@/lib/http";
+import { bumpVersion } from "@/lib/media";
 
 const Body = z.object({ hidden: z.boolean() });
 
@@ -15,5 +16,7 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
   const r = await db().update(schema.media).set({ status: b.hidden ? "hidden" : "ready" })
     .where(and(eq(schema.media.id, id), eq(schema.media.eventId, a.eid), inArray(schema.media.status, ["ready", "hidden"])))
     .returning({ id: schema.media.id });
-  return r.length ? json({ ok: true }) : err(404, "not_found");
+  if (!r.length) return err(404, "not_found");
+  await bumpVersion(a.eid); // guests' feeds drop/restore it within one poll
+  return json({ ok: true });
 }

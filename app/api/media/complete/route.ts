@@ -1,8 +1,7 @@
 import { z } from "zod";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db, schema } from "@/lib/db/client";
 import { getGuest } from "@/lib/auth";
-import { markReadyIfComplete } from "@/lib/media";
 import { storage } from "@/lib/storage";
 import { err, json, parse } from "@/lib/http";
 
@@ -20,15 +19,22 @@ export async function POST(req: Request) {
     return err(400, "bad_url");
   }
 
+  // One round trip: store URLs, flip to ready, bump the event's feed version.
+  const r = await db().execute(sql`
+    with u as (
+      update media set url = ${b.url}, thumb_url = ${b.thumbUrl}, status = 'ready', ready_at = now()
+      where id = ${b.mediaId} and guest_id = ${g.gid} and status = 'reserved'
+      returning event_id
+    ), v as (
+      update events set media_version = media_version + 1 where id in (select event_id from u) returning 1
+    )
+    select count(*)::int as n from u`);
+  if (Number((r.rows[0] as { n: number }).n) > 0) return json({ ok: true });
+
+  // Not updated: find out why (rare path)
   const [m] = await db().select({ status: schema.media.status }).from(schema.media)
     .where(and(eq(schema.media.id, b.mediaId), eq(schema.media.guestId, g.gid))).limit(1);
   if (!m) return err(404, "not_found");
-  if (m.status === "ready" || m.status === "hidden") return json({ ok: true });
-  if (m.status === "failed") return err(410, "expired"); // client re-reserves
-
-  await db().update(schema.media).set({ url: b.url, thumbUrl: b.thumbUrl })
-    .where(eq(schema.media.id, b.mediaId));
-  const ready = await markReadyIfComplete(b.mediaId);
-  console.info("[complete]", { mediaId: b.mediaId, ready });
-  return json({ ok: true });
+  if (m.status === "ready" || m.status === "hidden") return json({ ok: true }); // idempotent
+  return err(410, "expired"); // reservation expired → client re-reserves
 }

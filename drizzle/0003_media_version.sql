@@ -1,0 +1,1 @@
+ALTER TABLE "events" ADD COLUMN IF NOT EXISTS "media_version" bigint DEFAULT 0 NOT NULL;

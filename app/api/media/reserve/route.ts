@@ -21,8 +21,11 @@ const Body = z.object({
   lqip: z.string().max(200).regex(LQIP_RE).optional(),
 });
 
-/** Mark stale reservations failed and give their bytes back. Cheap, bounded, runs lazily. */
+/** Mark stale reservations failed and give their bytes back. Runs at most once a minute per instance. */
+let lastSweep = 0;
 async function sweepExpired() {
+  if (Date.now() - lastSweep < 60_000) return;
+  lastSweep = Date.now();
   const cutoff = new Date(Date.now() - LIMITS.reservationTtlMs);
   const rows = await db().update(schema.media).set({ status: "failed" })
     .where(and(eq(schema.media.status, "reserved"), lt(schema.media.createdAt, cutoff)))
@@ -48,11 +51,21 @@ export async function POST(req: Request) {
   if (b.durationS && b.durationS > LIMITS.maxVideoSeconds + 1) return json({ rejected: "type" }, { status: 422 });
 
   const d = db();
-  await sweepExpired().catch(() => {});
+  void sweepExpired().catch(() => {}); // off the critical path
 
-  // Dedup by content hash within the event.
-  const [existing] = await d.select().from(schema.media)
-    .where(and(eq(schema.media.eventId, event.id), eq(schema.media.sha256, b.sha256))).limit(1);
+  // One round trip for the independent reads: dedup row, per-guest rate counters, guest name.
+  const hourAgo = new Date(Date.now() - 3600_000);
+  const dayAgo = new Date(Date.now() - 86_400_000);
+  const [dupRows, rateRows, guestRows] = await d.batch([
+    d.select().from(schema.media)
+      .where(and(eq(schema.media.eventId, event.id), eq(schema.media.sha256, b.sha256))).limit(1),
+    d.select({
+      hourCount: sql<number>`count(*) filter (where ${schema.media.createdAt} >= ${hourAgo})`.mapWith(Number),
+      dayBytes: sql<number>`coalesce(sum(${schema.media.bytes} + ${schema.media.thumbBytes}), 0)`.mapWith(Number),
+    }).from(schema.media).where(and(eq(schema.media.guestId, g.gid), gte(schema.media.createdAt, dayAgo))),
+    d.select({ n: schema.guests.displayName }).from(schema.guests).where(eq(schema.guests.id, g.gid)),
+  ]);
+  const existing = dupRows[0];
   if (existing && existing.status !== "failed") {
     if (existing.status === "reserved" && existing.guestId === g.gid) {
       return json({ mediaId: existing.id, tickets: await tickets(event.id, existing.id, existing.contentType, b.thumbType) });
@@ -61,12 +74,7 @@ export async function POST(req: Request) {
   }
 
   // Per-guest rate limits.
-  const hourAgo = new Date(Date.now() - 3600_000);
-  const dayAgo = new Date(Date.now() - 86_400_000);
-  const [rate] = await d.select({
-    hourCount: sql<number>`count(*) filter (where ${schema.media.createdAt} >= ${hourAgo})`.mapWith(Number),
-    dayBytes: sql<number>`coalesce(sum(${schema.media.bytes} + ${schema.media.thumbBytes}), 0)`.mapWith(Number),
-  }).from(schema.media).where(and(eq(schema.media.guestId, g.gid), gte(schema.media.createdAt, dayAgo)));
+  const rate = rateRows[0] ?? { hourCount: 0, dayBytes: 0 };
   if (rate.hourCount >= LIMITS.perGuestItemsPerHour || rate.dayBytes + b.bytes > LIMITS.perGuestBytesPerDay) {
     return json({ rejected: "limit" }, { status: 429 });
   }
@@ -77,7 +85,7 @@ export async function POST(req: Request) {
   if (!verdict.ok) console.warn("[reserve] budget", verdict.reason);
   if (!verdict.ok) return json({ rejected: "budget", reason: verdict.reason }, { status: 507 });
 
-  const [guest] = await d.select({ n: schema.guests.displayName }).from(schema.guests).where(eq(schema.guests.id, g.gid));
+  const guest = guestRows[0];
   const values = {
     eventId: event.id, guestId: g.gid, guestName: guest?.n ?? null, kind: b.kind, sha256: b.sha256,
     contentType: b.contentType, bytes: b.bytes, thumbBytes: b.thumbBytes,

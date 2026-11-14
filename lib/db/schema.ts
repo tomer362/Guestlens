@@ -12,6 +12,8 @@ export const events = pgTable("events", {
   uploadOpen: boolean("upload_open").notNull().default(true),
   /** whether guests can see each other's uploads */
   galleryPublic: boolean("gallery_public").notNull().default(true),
+  /** bumped whenever the set of visible media changes; clients poll it to know when to refetch */
+  mediaVersion: bigint("media_version", { mode: "number" }).notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

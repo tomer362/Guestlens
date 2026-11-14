@@ -7,6 +7,10 @@ import { useI18n } from "@/lib/i18n/client";
 import { GALLERY } from "@/lib/config";
 import type { GalleryItem } from "@/app/api/gallery/route";
 import { lqipToDataUrl } from "@/lib/lqip";
+import { mergeFirstPage } from "@/lib/feed";
+
+/** Fired by the upload queue when one of this guest's uploads is live (same tab + other tabs). */
+export const UPLOADED_EVENT = "gl:uploaded";
 
 export function useGallery(slug: string, admin = false) {
   const [items, setItems] = useState<GalleryItem[]>([]);
@@ -14,54 +18,85 @@ export function useGallery(slug: string, admin = false) {
   const [loaded, setLoaded] = useState(false);
   const [isPrivate, setPrivate] = useState(false);
   const [fresh, setFresh] = useState(0);
-  const newest = useRef<string | null>(null);
+  const itemsRef = useRef<GalleryItem[]>([]);
+  const version = useRef<number | null>(null);
+  const busy = useRef(false);
   const qs = `slug=${encodeURIComponent(slug)}${admin ? "&admin=1" : ""}`;
 
-  const load = useCallback(async () => {
-    const r = await fetch(`/api/gallery?${qs}`, { cache: "no-store" }).then((r) => r.json()).catch(() => null);
-    if (!r) return;
-    setPrivate(!!r.private);
-    setItems(r.items ?? []);
-    setNextBefore(r.nextBefore ?? null);
-    newest.current = r.items?.[0]?.at ?? null;
-    setLoaded(true);
-  }, [qs]);
+  /**
+   * Poll the tiny version number; only when it changed, fetch the first page keyed by that
+   * version (CDN-shared by every guest, never stale) and merge it in.
+   */
+  const sync = useCallback(async (bypassCdn = false) => {
+    if (busy.current) return;
+    busy.current = true;
+    try {
+      const f = bypassCdn ? `&fresh=${Date.now()}` : "";
+      const vr = await fetch(`/api/gallery/version?${qs}${f}`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      if (!vr) return;
+      if (vr.private) { setPrivate(true); setLoaded(true); return; }
+      if (version.current === vr.v && !admin) return;
+      const page = await fetch(`/api/gallery?${qs}&v=${vr.v}${f}`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      if (!page) return;
+      setPrivate(!!page.private);
+      const firstLoad = version.current === null;
+      version.current = vr.v;
+      const pageItems: GalleryItem[] = page.items ?? [];
+      const r = mergeFirstPage(itemsRef.current, pageItems, pageItems.length >= GALLERY.pageSize);
+      itemsRef.current = r.items;
+      setItems(r.items);
+      if (r.reset) setNextBefore(page.nextBefore ?? null);
+      if (!firstLoad && r.added) setFresh((n) => n + r.added);
+      setLoaded(true);
+    } finally {
+      busy.current = false;
+    }
+  }, [qs, admin]);
 
   const more = useCallback(async () => {
     if (!nextBefore) return;
-    const r = await fetch(`/api/gallery?${qs}&before=${encodeURIComponent(nextBefore)}`).then((r) => r.json()).catch(() => null);
+    const v = version.current ?? 0;
+    const r = await fetch(`/api/gallery?${qs}&before=${encodeURIComponent(nextBefore)}&v=${v}`).then((r) => r.json()).catch(() => null);
     if (!r) return;
-    setItems((prev) => [...prev, ...r.items.filter((x: GalleryItem) => !prev.some((p) => p.id === x.id))]);
+    const prev = itemsRef.current;
+    const next = [...prev, ...r.items.filter((x: GalleryItem) => !prev.some((p) => p.id === x.id))];
+    itemsRef.current = next;
+    setItems(next);
     setNextBefore(r.nextBefore ?? null);
   }, [nextBefore, qs]);
 
-  // Poll for new items only while the tab is visible; slow down when nothing changes.
-  useEffect(() => {
-    load();
-    let delay: number = GALLERY.pollMs;
-    let timer: ReturnType<typeof setTimeout>;
-    const poll = async () => {
-      if (document.visibilityState === "visible" && newest.current) {
-        const r = await fetch(`/api/gallery?${qs}&since=${encodeURIComponent(newest.current)}`).then((r) => r.json()).catch(() => null);
-        const add: GalleryItem[] = r?.items ?? [];
-        if (add.length) {
-          newest.current = add[add.length - 1].at;
-          setItems((prev) => [...add.reverse().filter((x) => !prev.some((p) => p.id === x.id)), ...prev]);
-          setFresh((n) => n + add.length);
-          delay = GALLERY.pollMs;
-        } else delay = Math.min(delay * 1.5, 60_000);
-      } else if (document.visibilityState === "visible" && !newest.current) {
-        await load();
-      }
-      timer = setTimeout(poll, delay);
-    };
-    timer = setTimeout(poll, delay);
-    const vis = () => { if (document.visibilityState === "visible") { clearTimeout(timer); delay = GALLERY.pollMs; poll(); } };
-    document.addEventListener("visibilitychange", vis);
-    return () => { clearTimeout(timer); document.removeEventListener("visibilitychange", vis); };
-  }, [load, qs]);
+  const setItemsSynced = useCallback((fn: (x: GalleryItem[]) => GalleryItem[]) => {
+    const next = fn(itemsRef.current);
+    itemsRef.current = next;
+    setItems(next);
+  }, []);
 
-  return { items, setItems, loaded, isPrivate, more, hasMore: !!nextBefore, fresh, clearFresh: () => setFresh(0), reload: load };
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>;
+    let stopped = false;
+    const tick = async () => {
+      clearTimeout(timer);
+      if (document.visibilityState === "visible") await sync();
+      if (!stopped) timer = setTimeout(tick, GALLERY.versionPollMs);
+    };
+    void tick();
+    // back to the app → check right away instead of waiting for the next tick
+    const vis = () => { if (document.visibilityState === "visible") void tick(); };
+    // this guest just uploaded (this tab or another) → show it immediately, bypassing the CDN
+    const mine = () => { clearTimeout(timer); void sync(true).finally(() => { if (!stopped) timer = setTimeout(tick, GALLERY.versionPollMs); }); };
+    document.addEventListener("visibilitychange", vis);
+    addEventListener(UPLOADED_EVENT, mine);
+    let bc: BroadcastChannel | null = null;
+    try { bc = new BroadcastChannel("gl"); bc.onmessage = (e) => { if (e.data === UPLOADED_EVENT) mine(); }; } catch {}
+    return () => {
+      stopped = true; clearTimeout(timer);
+      document.removeEventListener("visibilitychange", vis);
+      removeEventListener(UPLOADED_EVENT, mine);
+      bc?.close();
+    };
+  }, [sync]);
+
+  return { items, setItems: setItemsSynced, loaded, isPrivate, more, hasMore: !!nextBefore, fresh, clearFresh: () => setFresh(0), reload: () => sync(true) };
 }
 
 export function Tile({ it, onClick, i, hidden }: { it: GalleryItem; onClick: () => void; i: number; hidden?: boolean }) {
@@ -70,9 +105,11 @@ export function Tile({ it, onClick, i, hidden }: { it: GalleryItem; onClick: () 
   // first screenful loads eagerly at high priority; the rest lazily
   const eager = i < 15;
   return (
-    <m.button type="button" onClick={onClick} data-tile={it.id} style={{ visibility: hidden ? "hidden" : undefined }}
-      className="relative aspect-square overflow-hidden rounded-lg bg-blush active:brightness-90"
-      initial={{ opacity: 0, scale: 0.94 }} animate={{ opacity: 1, scale: 1 }} transition={{ delay: Math.min(i, 12) * 0.025 }}>
+    // plain element + CSS entrance (no per-tile animation runtime); content-visibility lets the
+    // browser skip off-screen tiles entirely, so a 3,000-photo album scrolls like a 30-photo one
+    <button type="button" onClick={onClick} data-tile={it.id}
+      style={{ visibility: hidden ? "hidden" : undefined, animationDelay: `${Math.min(i, 12) * 25}ms` }}
+      className="tile-in relative aspect-square overflow-hidden rounded-lg bg-blush active:brightness-90 [contain-intrinsic-size:auto_120px] [content-visibility:auto]">
       {ph && (
         // 4×3 color grid from the gallery JSON, blurred: shows instantly, no request
         <img src={ph} alt="" aria-hidden className="absolute inset-0 size-full scale-125 object-cover blur-lg" />
@@ -83,7 +120,7 @@ export function Tile({ it, onClick, i, hidden }: { it: GalleryItem; onClick: () 
       {it.kind === "video" && (
         <span className="absolute inset-0 grid place-items-center"><span className="grid size-9 place-items-center rounded-full bg-black/40"><Play className="size-4 fill-white text-white" aria-hidden /></span></span>
       )}
-    </m.button>
+    </button>
   );
 }
 

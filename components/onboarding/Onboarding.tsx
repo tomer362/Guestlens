@@ -8,14 +8,8 @@ import { savedName, updateName } from "@/client/session";
 import { GalleryArt, ShootArt, UploadArt, WelcomeArt } from "./Illustrations";
 import { InstallGuide } from "./InstallGuide";
 
-export const ONBOARDED_KEY = "gl_onboarded_v1";
-
-export function hasOnboarded(): boolean {
-  try { return localStorage.getItem(ONBOARDED_KEY) === "1"; } catch { return false; }
-}
-function markOnboarded() {
-  try { localStorage.setItem(ONBOARDED_KEY, "1"); } catch {}
-}
+import { markOnboarded } from "./flag";
+export { ONBOARDED_KEY, hasOnboarded } from "./flag";
 
 type StepId = "welcome" | "shoot" | "upload" | "gallery" | "install";
 

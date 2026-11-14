@@ -16,8 +16,8 @@ export type GalleryItem = {
  * GET /api/gallery?slug=…&before=ISO_id  next older page (keyset)
  * &admin=1 includes hidden items (admin cookie, never cached)
  *
- * Guest responses are identical for every viewer, so they're CDN-cacheable:
- * hundreds of phones polling every 15 s collapse into ~1 origin hit per s-maxage.
+ * Clients poll /api/gallery/version and refetch the first page with &v=<version> only when it
+ * changes (see useGallery). Responses are identical for every guest, so they're CDN-shared.
  */
 export async function GET(req: Request) {
   const q = new URL(req.url).searchParams;
@@ -30,18 +30,23 @@ export async function GET(req: Request) {
   const admin = wantAdmin ? await getAdmin() : null;
   if (wantAdmin && admin?.eid !== event.id) return err(401, "admin");
   if (!admin && !event.galleryPublic) {
-    return json({ private: true, items: [] }, { headers: { "Cache-Control": `public, s-maxage=${GALLERY.sMaxAge}` } });
+    return json({ private: true, items: [] }, { headers: { "Cache-Control": `public, max-age=0, s-maxage=${GALLERY.versionMaxAge}` } });
   }
 
   const m = schema.media;
   const statuses = admin ? (["ready", "hidden"] as const) : (["ready"] as const);
   const base = and(eq(m.eventId, event.id), inArray(m.status, [...statuses]));
 
+  // only what the response uses
+  const cols = {
+    id: m.id, kind: m.kind, url: m.url, thumbUrl: m.thumbUrl, width: m.width, height: m.height,
+    durationS: m.durationS, guestName: m.guestName, readyAt: m.readyAt, status: m.status, lqip: m.lqip,
+  };
   const since = q.get("since");
   const before = q.get("before");
   let rows;
   if (since) {
-    rows = await db().select().from(m).where(and(base, gt(m.readyAt, new Date(since))))
+    rows = await db().select(cols).from(m).where(and(base, gt(m.readyAt, new Date(since))))
       .orderBy(asc(m.readyAt), asc(m.id)).limit(200);
   } else {
     let cond = base;
@@ -50,7 +55,7 @@ export async function GET(req: Request) {
       const t = new Date(at);
       cond = and(base, or(lt(m.readyAt, t), and(eq(m.readyAt, t), sql`${m.id} < ${id}`)));
     }
-    rows = await db().select().from(m).where(cond).orderBy(desc(m.readyAt), desc(m.id)).limit(GALLERY.pageSize);
+    rows = await db().select(cols).from(m).where(cond).orderBy(desc(m.readyAt), desc(m.id)).limit(GALLERY.pageSize);
   }
 
   const items: GalleryItem[] = rows.map((r) => ({
@@ -60,9 +65,10 @@ export async function GET(req: Request) {
   const last = rows[rows.length - 1];
   const nextBefore = !since && rows.length === GALLERY.pageSize && last ? `${last.readyAt!.toISOString()}_${last.id}` : null;
 
-  return json({ items, nextBefore }, {
-    headers: {
-      "Cache-Control": admin ? "private, no-store" : `public, max-age=0, s-maxage=${GALLERY.sMaxAge}, stale-while-revalidate=30`,
-    },
-  });
+  // Keyed by feed version (&v=…): a given version's page never changes, so it can sit in the CDN
+  // and be shared by every guest; a new version is a new URL, so it is never stale.
+  const cache = admin || q.has("fresh") ? "private, no-store"
+    : q.has("v") ? `public, max-age=0, s-maxage=${GALLERY.pageMaxAge}`
+    : `public, max-age=0, s-maxage=${GALLERY.versionMaxAge}`;
+  return json({ items, nextBefore }, { headers: { "Cache-Control": cache } });
 }

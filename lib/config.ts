@@ -58,9 +58,14 @@ export const LIMITS = {
 
 export const GALLERY = {
   pageSize: 60,
-  pollMs: 15_000,
-  /** CDN cache for the polling endpoint; 400 phones polling ≈ 1 origin hit / 10 s */
-  sMaxAge: 10,
+  /**
+   * Clients poll a tiny version number this often (while visible) and only fetch items when it
+   * changes. The version reply is CDN-cached for `versionMaxAge` s, so 400 phones ≈ 1 origin
+   * read per 2 s; item pages are keyed by version, so they can be cached long and never be stale.
+   */
+  versionPollMs: 4_000,
+  versionMaxAge: 2,
+  pageMaxAge: 300,
 } as const;
 
 export const MB_ = MB;
