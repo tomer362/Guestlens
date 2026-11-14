@@ -73,13 +73,33 @@ npm run icons        # re-render public/icons from scripts/icon.svg
 ```
 `GL_DEMO=1 npm start` serves the demo event from a production build.
 
+## How media is compressed (fastest path first, per device)
+**Video:**
+1. **WebCodecs** (hardware encoder): uploaded as-is, repackaged, or re-encoded to H.264 ≤1080p.
+2. **No WebCodecs** (Firefox Android, iOS < 16.4):
+   - The original goes up as-is if it's H.264/HEVC and within the limit.
+   - Otherwise it's re-recorded in realtime with **MediaRecorder** (the browser's hardware encoder, 1× clip length, no download). The result is H.264 MP4 where available, else VP8 WebM, then repackaged so it has a duration and seek index.
+3. Refused with a message only if none of these is possible.
+
+**Photos:** canvas WebP where the browser supports it (Chrome, Firefox, Samsung, Edge). On Safari/iOS (no canvas WebP):
+- If a one-off device benchmark passes, photos are encoded with **WASM WebP** (jSquash, about 300 KB, lazy, in a worker). That gives the same files as native WebP, about 60% smaller than the canvas JPEG fallback.
+- Otherwise they stay canvas JPEG.
+
+HEIC is decoded through a lazy WASM decoder.
+
+**Why not ffmpeg.wasm or "Bun"?**
+- **ffmpeg.wasm** measures about 7 fps (single-thread) to 25 fps (multi-thread, 100% CPU) for 1080p H.264 on laptops, 10–20× slower than the hardware path. It's a ~25 MB download, and its threads need cross-origin isolation headers (Safari only supports `require-corp`, which would break our CDN images).
+- **Bun** is a server runtime. Media never passes through our server (phone → storage directly), so it can't speed up compression.
+
+Each device logs one `caps …` diagnostics line saying which path it can use.
+
 ## Browser support (what each guest's browser does)
 | Browser | Photos | Videos |
 |---|---|---|
-| Safari / any iOS browser 16.4+ | compressed (WebP or JPEG) | converted on the phone, or the original .mov/.mp4 is uploaded |
+| Safari / any iOS browser 16.4+ | WASM WebP (≈60% smaller than JPEG) when the device is fast enough, else JPEG | converted on the phone, or the original .mov/.mp4 is uploaded |
 | Chrome / Edge / Samsung / Opera (Android, desktop) | compressed; HEIC through a lazy WASM decoder | converted (hardware when available) |
 | Firefox desktop 130+ | compressed; HEIC through the WASM decoder | converted if an H.264 encoder exists, otherwise the original (≤ 60 MB) |
-| Firefox Android, iOS < 16.4 | compressed | no WebCodecs: original MP4/MOV ≤ 60 MB, larger ones refused with a message |
+| Firefox Android, iOS < 16.4 | compressed | no WebCodecs: original MP4/MOV ≤ 60 MB; larger → realtime MediaRecorder re-encode (Firefox/Chromium); iOS < 16.4 has no recorder path, so larger ones are refused |
 | In-app browsers (WhatsApp, Instagram…) / Chrome on iOS | as above | as above; files kept in memory when IndexedDB can't hold them |
 | Private mode without IndexedDB | in-memory queue for the visit | same |
 

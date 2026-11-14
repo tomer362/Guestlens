@@ -46,7 +46,9 @@ export function getBudget(): Budget {
 export const LIMITS = {
   photo: { types: ["image/webp", "image/jpeg"], maxBytes: 2 * MB },
   // video/quicktime: iPhone originals uploaded as-is when on-device conversion isn't possible
-  video: { types: ["video/mp4", "video/quicktime"], maxBytes: 60 * MB },
+  // video/webm: realtime MediaRecorder output (Firefox Android & other browsers without WebCodecs)
+  // NEXT_PUBLIC_VIDEO_MAX_MB raises the cap on Pro (client + server read the same value)
+  video: { types: ["video/mp4", "video/quicktime", "video/webm"], maxBytes: (Number(process.env.NEXT_PUBLIC_VIDEO_MAX_MB) || 60) * MB },
   thumb: { types: ["image/webp", "image/jpeg"], maxBytes: 100 * 1024 },
   maxVideoSeconds: 180,
   /** without WebCodecs we upload the original, so cap it */

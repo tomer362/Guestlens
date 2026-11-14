@@ -6,7 +6,7 @@
  * Set NEXT_PUBLIC_DIAG=1 to send everything while debugging. Never throws.
  */
 const VERBOSE = process.env.NEXT_PUBLIC_DIAG === "1";
-const IMPORTANT = /fail|error|lost|timeout|stall|fallback|can't|takeover|uploaded|no-webcodecs|forceOriginal|wasm|paused|old gl-queue|too slow/i;
+const IMPORTANT = /^caps |fail|error|lost|timeout|stall|fallback|can't|takeover|uploaded|no-webcodecs|forceOriginal|wasm|paused|old gl-queue|too slow/i;
 const MAX_PER_SESSION = 30;
 let sent = 0;
 

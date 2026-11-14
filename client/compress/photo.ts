@@ -7,7 +7,7 @@ const THUMB_QUALITY = 0.6;
 const LQIP_EDGE = 4;
 const QUALITY = 0.75;
 
-export interface Encoded { blob: Blob; type: "image/webp" | "image/jpeg"; width: number; height: number; }
+export interface Encoded { blob: Blob; type: "image/webp" | "image/jpeg"; width: number; height: number; encoder?: string; }
 
 function fit(w: number, h: number, max: number) {
   const s = Math.min(1, max / Math.max(w, h));
@@ -172,10 +172,35 @@ async function decodePhoto(file: Blob): Promise<Decoded> {
  * 16 MP phone photo (~6.5 MB) → 2048 px WebP q75 (~600 KB) + 360 px square thumb.
  * Re-encoding drops EXIF/GPS; orientation is applied while decoding.
  */
+/**
+ * Main image: canvas WebP where the browser can (Chrome/Firefox/Samsung/Edge); WASM WebP where it
+ * can't (Safari/iOS → otherwise canvas JPEG, ~2.5× bigger), if this device is fast enough.
+ */
+async function encodeMain(src: CanvasImageSource, sw: number, sh: number): Promise<Encoded> {
+  if (!(await supportsWebpEncode())) {
+    try {
+      const { shouldUseWasmWebp, encodeWebpWasm } = await import("./webp-wasm");
+      if (await shouldUseWasmWebp()) {
+        const { w, h } = fit(sw, sh, MAX_EDGE);
+        const c = document.createElement("canvas"); c.width = w; c.height = h;
+        const ctx = c.getContext("2d", { willReadFrequently: true })!;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(src, 0, 0, w, h);
+        const { blob, ms } = await encodeWebpWasm(ctx.getImageData(0, 0, w, h), Math.round(QUALITY * 100));
+        return { blob, type: "image/webp", width: w, height: h, encoder: `wasm-webp ${Math.round(ms)}ms` };
+      }
+    } catch {
+      // fall through to the canvas encoder
+    }
+  }
+  const e = await encodeScaled(src, sw, sh, MAX_EDGE);
+  return { ...e, encoder: `canvas-${e.type === "image/webp" ? "webp" : "jpeg"}` };
+}
+
 export async function compressPhoto(file: Blob): Promise<{ main: Encoded; thumb: Encoded; lqip?: string }> {
   const d = await decodePhoto(file);
   try {
-    const main = await encodeScaled(d.src, d.w, d.h, MAX_EDGE);
+    const main = await encodeMain(d.src, d.w, d.h);
     const { thumb, lqip } = await makeThumbs(d.src, d.w, d.h);
     return { main, thumb, lqip };
   } finally {

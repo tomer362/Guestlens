@@ -229,7 +229,7 @@ async function prepare(it: QueueItem, src: Blob): Promise<Prepared> {
     const { main, thumb, lqip } = r;
     return { file: main.blob, thumb: thumb.blob, meta: {
       fileType: main.type, thumbType: thumb.type, lqip,
-      diag: `photo ${((performance.now() - t0) / 1000).toFixed(1)}s · ${(src.size / 1e6).toFixed(1)}MB → ${(main.blob.size / 1e3).toFixed(0)}KB`,
+      diag: `photo ${((performance.now() - t0) / 1000).toFixed(1)}s · ${(src.size / 1e6).toFixed(1)}MB → ${(main.blob.size / 1e3).toFixed(0)}KB ${main.encoder ?? ""}`.trim(),
       width: main.width, height: main.height, sha256: await sha256Hex(main.blob),
     } };
   }
@@ -508,6 +508,8 @@ export async function startQueue() {
   wired = true;
   await ensureDb();
   diag(`queue start tab=${TAB} ua=${navigator.userAgent.slice(0, 120)}`);
+  // which compression path this device can use (once per session, off the critical path)
+  setTimeout(() => { import("./compress/capabilities").then((m) => m.reportCapabilities()).catch(() => {}); }, 3000);
   // evidence for the old bug: was a (frozen) tab still holding the previous cross-tab lock?
   (navigator as Navigator & { locks?: LockManager }).locks?.query?.().then((q) => {
     const held = q.held?.filter((l) => l.name === "gl-queue").length ?? 0;

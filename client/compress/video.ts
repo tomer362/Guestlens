@@ -1,6 +1,7 @@
 import { makeThumbs, THUMB_EDGE, type Encoded } from "./photo";
 import { diag as report } from "@/client/diag";
-import { prepareVideo, VideoError, type VideoResult } from "./video-core";
+import { canTranscode, prepareVideo, VideoError, type VideoResult } from "./video-core";
+import { LIMITS } from "@/lib/config";
 import type { WorkerOut } from "./video.worker";
 
 export { VideoError, canTranscode } from "./video-core";
@@ -120,9 +121,57 @@ export class PausedError extends Error { constructor() { super("paused"); } }
 /** No message at all from the conversion worker for this long → it's stuck (or was killed). */
 const STALL_MS = 90_000;
 
-export function compressVideo(
+/**
+ * Browsers without a WebCodecs H.264 encoder (Firefox Android, iOS < 16.4, …):
+ *   original as-is if usable and within the limit → realtime hardware re-encode with
+ *   MediaRecorder → refuse with a message.
+ */
+async function prepareWithoutWebCodecs(file: Blob, onProgress?: (p: number) => void, onInfo?: (s: string) => void, signal?: AbortSignal): Promise<VideoResult> {
+  let codec: string | null = null, w = 0, h = 0, duration = 0;
+  try {
+    const mb = await import("mediabunny"); // demuxing is pure JS: works without WebCodecs
+    const input = new mb.Input({ source: new mb.BlobSource(file), formats: mb.ALL_FORMATS });
+    duration = await input.computeDuration();
+    const t = await input.getPrimaryVideoTrack();
+    codec = t?.codec ?? null; w = t?.displayWidth ?? 0; h = t?.displayHeight ?? 0;
+  } catch { /* unknown container: the recorder may still play it */ }
+  if (duration > LIMITS.maxVideoSeconds + 1) throw new VideoError("tooLong");
+  const type = file.type || "video/quicktime";
+  const containerOk = (LIMITS.video.types as readonly string[]).includes(type);
+  const src = `${codec ?? "?"} ${w}x${h} ${Math.round(duration)}s ${(file.size / 1e6).toFixed(0)}MB`;
+  onInfo?.(`${src} · no WebCodecs`);
+  if ((codec === "avc" || codec === "hevc") && containerOk && file.size <= LIMITS.video.maxBytes) {
+    report(`video no-webcodecs → original ${src}`);
+    onProgress?.(1);
+    return { blob: file.type ? file : new Blob([file], { type }), width: w, height: h, duration, path: "original", diag: `original (no WebCodecs) · ${src}` };
+  }
+  const { recorderSupported, recordTranscode, RecorderAborted } = await import("./video-recorder");
+  if (!recorderSupported()) { report(`video no-webcodecs, no recorder, too big ${src}`); throw new VideoError("tooBig"); }
+  report(`video no-webcodecs → realtime recorder ${src}`);
+  const t0 = performance.now();
+  try {
+    const r = await recordTranscode(file, { onProgress, signal });
+    const took = ((performance.now() - t0) / 1000).toFixed(0);
+    report(`video recorder done ${took}s → ${(r.blob.size / 1e6).toFixed(1)}MB ${r.mime} ${r.width}x${r.height}`);
+    if (r.blob.size > LIMITS.video.maxBytes) throw new VideoError("tooBig");
+    return { blob: r.blob, width: r.width, height: r.height, duration: r.duration || duration, path: "transcode", diag: `recorder ${took}s → ${(r.blob.size / 1e6).toFixed(0)}MB ${r.mime.split("/")[1]} · ${src}` };
+  } catch (e) {
+    if (e instanceof RecorderAborted) throw new PausedError();
+    throw e;
+  }
+}
+
+export async function compressVideo(
   file: Blob, onProgress?: (p: number) => void, onInfo?: (s: string) => void, signal?: AbortSignal,
   forceOriginal = false,
+): Promise<VideoResult> {
+  if (!(await canTranscode().catch(() => false))) return prepareWithoutWebCodecs(file, onProgress, onInfo, signal);
+  return compressInWorker(file, onProgress, onInfo, signal, forceOriginal);
+}
+
+function compressInWorker(
+  file: Blob, onProgress: ((p: number) => void) | undefined, onInfo: ((s: string) => void) | undefined,
+  signal: AbortSignal | undefined, forceOriginal: boolean,
 ): Promise<VideoResult> {
   let worker: Worker | null = null;
   try {
