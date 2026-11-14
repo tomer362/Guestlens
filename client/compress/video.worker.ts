@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 import { prepareVideo, VideoError } from "./video-core";
 
-export type WorkerIn = { file: Blob };
+export type WorkerIn = { file: Blob; forceOriginal?: boolean };
 export type WorkerOut =
   | { type: "progress"; p: number }
   | { type: "info"; s: string }
@@ -14,6 +14,7 @@ const post = (m: WorkerOut) => (self as unknown as DedicatedWorkerGlobalScope).p
 self.onmessage = async (e: MessageEvent<WorkerIn>) => {
   try {
     const result = await prepareVideo(e.data.file, {
+      forceOriginal: e.data.forceOriginal,
       progress: (p) => post({ type: "progress", p }),
       info: (s) => post({ type: "info", s }),
       report: (s) => post({ type: "report", s }),

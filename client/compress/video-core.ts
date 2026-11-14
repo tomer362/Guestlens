@@ -14,6 +14,8 @@ export interface VideoResult {
   blob: Blob; width?: number; height?: number; duration?: number; path: VideoPath; diag?: string;
 }
 export interface CoreHooks {
+  /** skip conversion and upload the original when it is usable (after repeated stalls) */
+  forceOriginal?: boolean;
   progress?: (p: number) => void;
   info?: (s: string) => void;
   report?: (s: string) => void;
@@ -72,6 +74,11 @@ export async function prepareVideo(file: Blob, hooks: CoreHooks = {}): Promise<V
   report(`video probed @${el()} ${src} fitsAsIs=${fitsAsIs}`);
   hooks.info?.(src);
 
+  if (hooks.forceOriginal && canFallBackToOriginal) {
+    report(`video forceOriginal (${origType}) after repeated stalls`);
+    hooks.progress?.(1);
+    return { blob: original(), width: w, height: h, duration, path: "original", diag: `original (forced) · ${src}` };
+  }
   if (fitsAsIs && file.type === "video/mp4") {
     hooks.progress?.(1);
     return { blob: file, width: w, height: h, duration, path: "original", diag: `original · ${src}` };

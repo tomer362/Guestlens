@@ -44,6 +44,9 @@ export const UploadScreen = forwardRef<UploadScreenHandle, { slug: string; uploa
   const [name, setName] = useState("");
   const [editing, setEditing] = useState(false);
   const [online, setOnline] = useState(true);
+  // re-render every few seconds so "stuck in line" items get a retry button
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 5000); return () => clearInterval(t); }, []);
 
   useImperativeHandle(ref, () => ({ openCamera: () => photoIn.current?.click() }));
   useEffect(() => {
@@ -167,7 +170,8 @@ export const UploadScreen = forwardRef<UploadScreenHandle, { slug: string; uploa
               </div>
               {it.status === "done" || it.status === "duplicate" ? (
                 <Check className="size-5 text-emerald-600" aria-hidden />
-              ) : it.status === "failed" || (it.status === "waiting" && it.error !== "budget") ? (
+              ) : it.status === "failed" || (it.status === "waiting" && it.error !== "budget")
+                || (it.status === "queued" && it.error !== "paused" && now - it.createdAt > 20_000 && (!it.lease || it.lease.until < now)) ? (
                 <button type="button" onClick={() => retry(it.id!)} aria-label={t.common.retry} className="grid size-8 place-items-center rounded-full bg-blush"><RotateCw className="size-4" aria-hidden /></button>
               ) : it.status === "rejected" ? (
                 <button type="button" onClick={() => removeItem(it.id!)} aria-label={t.common.close} className="grid size-8 place-items-center rounded-full bg-blush"><X className="size-4" aria-hidden /></button>

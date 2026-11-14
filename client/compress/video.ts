@@ -117,8 +117,12 @@ export async function posterFromMp4(blob: Blob) {
 /** Thrown when preparation was stopped because the app went to the background; the item simply resumes later. */
 export class PausedError extends Error { constructor() { super("paused"); } }
 
+/** No message at all from the conversion worker for this long → it's stuck (or was killed). */
+const STALL_MS = 90_000;
+
 export function compressVideo(
   file: Blob, onProgress?: (p: number) => void, onInfo?: (s: string) => void, signal?: AbortSignal,
+  forceOriginal = false,
 ): Promise<VideoResult> {
   let worker: Worker | null = null;
   try {
@@ -126,13 +130,24 @@ export function compressVideo(
   } catch {
     worker = null;
   }
-  if (!worker) return prepareVideo(file, { progress: onProgress, info: onInfo, report });
+  if (!worker) return prepareVideo(file, { progress: onProgress, info: onInfo, report, forceOriginal });
   const w = worker;
   return new Promise<VideoResult>((resolve, reject) => {
+    let last = Date.now();
+    const watchdog = setInterval(() => {
+      if (Date.now() - last < STALL_MS) return;
+      clearInterval(watchdog);
+      w.terminate();
+      report(`video stalled: no worker message for ${STALL_MS / 1000}s`);
+      reject(new Error("stalled_video"));
+    }, 5_000);
+    const settle = <T,>(fn: (v: T) => void) => (v: T) => { clearInterval(watchdog); fn(v); };
+    resolve = settle(resolve); reject = settle(reject);
     const abort = () => { w.terminate(); report("video paused (app in background)"); reject(new PausedError()); };
     if (signal?.aborted) return abort();
     signal?.addEventListener("abort", abort, { once: true });
     w.onmessage = (e: MessageEvent<WorkerOut>) => {
+      last = Date.now();
       const m = e.data;
       if (m.type === "progress") onProgress?.(m.p);
       else if (m.type === "info") onInfo?.(m.s);
@@ -144,8 +159,12 @@ export function compressVideo(
       // worker failed to load (old browser / CSP): run on the main thread instead
       w.terminate();
       report(`video worker error ${ev.message ?? ""} → main thread`);
-      prepareVideo(file, { progress: onProgress, info: onInfo, report }).then(resolve, reject);
+      const alive = () => { last = Date.now(); };
+      prepareVideo(file, {
+        progress: (p) => { alive(); onProgress?.(p); }, info: (s) => { alive(); onInfo?.(s); },
+        report: (s) => { alive(); report(s); }, forceOriginal,
+      }).then(resolve, reject);
     };
-    w.postMessage({ file });
+    w.postMessage({ file, forceOriginal });
   });
 }
