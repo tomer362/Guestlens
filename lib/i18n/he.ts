@@ -57,6 +57,7 @@ export const he: Dict = {
     progress: "{done} מתוך {total} הועלו",
     waiting: "ממתין לרשת…",
     queued: "בתור…",
+    lost: "הקובץ לא נשמר במכשיר. בחרו אותו שוב",
     paused: "ימשיך כשתחזרו לאפליקציה",
     compressing: "מכין…",
     uploading: "מעלה…",

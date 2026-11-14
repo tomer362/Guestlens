@@ -1,10 +1,10 @@
 "use client";
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { AnimatePresence, m } from "motion/react";
 import { liveQuery } from "dexie";
 import { Camera, Check, CloudOff, ImagePlus, Lock, Pencil, RotateCw, Video, X } from "lucide-react";
 import { useI18n } from "@/lib/i18n/client";
-import { enqueue, qdb, removeItem, retry, type QueueItem } from "@/client/queue";
+import { enqueue, getBlob, qdb, removeItem, retry, type QueueItem } from "@/client/queue";
 import { savedName, updateName } from "@/client/session";
 
 export interface UploadScreenHandle { openCamera(): void; }
@@ -20,9 +20,18 @@ function useQueue(slug: string) {
 }
 
 function Thumb({ item }: { item: QueueItem }) {
-  const src = item.thumb;
-  const url = useMemo(() => (src ? URL.createObjectURL(src) : null), [src]);
-  useEffect(() => () => { if (url) URL.revokeObjectURL(url); }, [url]);
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true, made: string | null = null;
+    if (item.id != null && item.thumbV) {
+      getBlob(item.id, "thumb").then((b) => {
+        if (!alive || !b) return;
+        made = URL.createObjectURL(b);
+        setUrl(made);
+      });
+    }
+    return () => { alive = false; if (made) URL.revokeObjectURL(made); };
+  }, [item.id, item.thumbV]);
   return (
     <div className="relative size-14 shrink-0 overflow-hidden rounded-xl bg-blush">
       {url ? <img src={url} alt="" className="size-full object-cover" /> : (
@@ -78,7 +87,7 @@ export const UploadScreen = forwardRef<UploadScreenHandle, { slug: string; uploa
       case "done": return t.upload.done;
       case "duplicate": return t.upload.duplicate;
       case "waiting": return i.error === "budget" ? t.upload.rejectedBudget : i.error === "limit" ? t.upload.rejectedLimit : t.upload.waiting;
-      case "rejected": return ({ closed: t.upload.rejectedClosed, tooBig: t.upload.tooBig, tooLong: t.upload.tooLong } as Record<string, string>)[i.error ?? ""] ?? t.upload.unsupported;
+      case "rejected": return ({ closed: t.upload.rejectedClosed, tooBig: t.upload.tooBig, tooLong: t.upload.tooLong, lost: t.upload.lost } as Record<string, string>)[i.error ?? ""] ?? t.upload.unsupported;
       case "failed": return t.upload.failed;
     }
   };

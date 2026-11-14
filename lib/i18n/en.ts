@@ -55,6 +55,7 @@ export const en = {
     progress: "{done} of {total} uploaded",
     waiting: "Waiting for network…",
     queued: "In line…",
+    lost: "The file wasn't kept on this device. Please pick it again",
     paused: "Continues when you're back in the app",
     compressing: "Preparing…",
     uploading: "Uploading…",

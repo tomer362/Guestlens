@@ -17,12 +17,20 @@ export interface QueueItem {
   kind: "photo" | "video";
   status: ItemStatus;
   createdAt: number;
-  /** the original (dropped after compression to free IndexedDB space) */
-  original?: Blob;
-  file?: Blob;
+  /**
+   * Files live in a separate "blobs" store + an in-memory cache (see putBlob/getBlob), never on
+   * this record: Chrome on iOS (WKWebView) can't re-store Blobs in IndexedDB, and every status
+   * update used to rewrite the whole record including the files.
+   */
+  name?: string;
+  /** compression done; the "file" and "thumb" blobs exist */
+  prepared?: boolean;
   fileType?: string;
-  thumb?: Blob;
+  fileBytes?: number;
   thumbType?: "image/webp" | "image/jpeg";
+  thumbBytes?: number;
+  /** bumped whenever the thumb blob changes, so the list re-reads it */
+  thumbV?: number;
   /** tiny blurred preview (data URL) */
   lqip?: string;
   sha256?: string;
@@ -46,22 +54,84 @@ export interface QueueItem {
   lease?: { owner: string; until: number };
 }
 
+type BlobPart = "original" | "file" | "thumb";
 class QueueDB extends Dexie {
   items!: Table<QueueItem, number>;
+  blobs!: Table<{ key: string; blob: Blob }, string>;
   constructor() {
     super("guestlens");
     this.version(1).stores({ items: "++id, slug, status, nextAt, createdAt" });
+    // v2: files move out of the item records. Old in-record blobs are dropped (they were exactly
+    // what broke on Chrome iOS); unfinished old items will ask to be picked again.
+    this.version(2).stores({ items: "++id, slug, status, nextAt, createdAt", blobs: "key" }).upgrade(async (tx) => {
+      await tx.table("items").toCollection().modify((i: Record<string, unknown>) => {
+        const hadFile = !!i.file;
+        delete i.original; delete i.file; delete i.thumb;
+        if (!hadFile && ["queued", "compressing", "uploading", "waiting", "failed"].includes(i.status as string)) i.prepared = false;
+      });
+    });
   }
 }
 let _db: QueueDB | null = null;
 export const qdb = () => (_db ??= new QueueDB());
 
+// ---------- file storage: memory first, IndexedDB best-effort (to resume after a reload) ----------
+const mem = new Map<string, Blob>();
+let idbBlobs: boolean | null = null; // learned at first write
+let idbWarned = false;
+const bkey = (id: number, part: BlobPart) => `${id}:${part}`;
+
+export async function putBlob(id: number, part: BlobPart, blob: Blob) {
+  const key = bkey(id, part);
+  mem.set(key, blob);
+  if (idbBlobs === false) return;
+  try {
+    await qdb().blobs.put({ key, blob });
+    idbBlobs = true;
+  } catch (e) {
+    if (!idbWarned) { idbWarned = true; diag(`idb can't store files → memory only: ${String((e as Error)?.message ?? e).slice(0, 140)}`); }
+    idbBlobs = false;
+  }
+}
+
+/** The blob, or undefined if it's gone or unreadable (e.g. a WebKit-persisted File after reload). */
+export async function getBlob(id: number, part: BlobPart): Promise<Blob | undefined> {
+  const key = bkey(id, part);
+  const m = mem.get(key);
+  if (m) return m;
+  try {
+    const r = await qdb().blobs.get(key);
+    if (!r?.blob) return undefined;
+    await r.blob.slice(0, 1).arrayBuffer(); // prove it's still readable
+    mem.set(key, r.blob);
+    return r.blob;
+  } catch {
+    return undefined;
+  }
+}
+
+async function delBlobs(id: number, parts: BlobPart[] = ["original", "file", "thumb"]) {
+  for (const p of parts) mem.delete(bkey(id, p));
+  await qdb().blobs.bulkDelete(parts.map((p) => bkey(id, p))).catch(() => {});
+}
+
 const ACTIVE: ItemStatus[] = ["queued", "compressing", "uploading", "waiting"];
 const CONCURRENCY = 2;
 const LEASE_MS = 30_000;
 const HEARTBEAT_MS = 8_000;
-/** This tab's identity for leases. */
-const TAB = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID().slice(0, 8) : Math.random().toString(36).slice(2, 10);
+/**
+ * This tab's identity for leases. Kept in sessionStorage so a reload of the same tab still owns
+ * its leases (otherwise its own unfinished items would wait out a 30 s lease after every reload).
+ */
+const TAB = (() => {
+  const fresh = () => (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID().slice(0, 8) : Math.random().toString(36).slice(2, 10));
+  try {
+    if (typeof sessionStorage === "undefined") return fresh();
+    const v = sessionStorage.getItem("gl_tab") ?? fresh();
+    sessionStorage.setItem("gl_tab", v);
+    return v;
+  } catch { return fresh(); }
+})();
 
 const leaseFree = (i: QueueItem, now = Date.now()) => !i.lease || i.lease.until < now || i.lease.owner === TAB;
 
@@ -78,13 +148,14 @@ class LostLease extends Error { constructor() { super("lost_lease"); } }
 
 export async function enqueue(slug: string, files: File[]) {
   const now = Date.now();
-  const items: QueueItem[] = files
-    .filter((f) => f.type.startsWith("image/") || f.type.startsWith("video/"))
-    .map((f, i) => ({
-      slug, kind: f.type.startsWith("video/") ? "video" : "photo", status: "queued",
-      createdAt: now + i, original: f, attempts: 0, nextAt: 0,
-    }));
-  await qdb().items.bulkAdd(items);
+  const picked = files.filter((f) => f.type.startsWith("image/") || f.type.startsWith("video/"));
+  const items: QueueItem[] = picked.map((f, i) => ({
+    slug, kind: f.type.startsWith("video/") ? "video" : "photo", status: "queued",
+    createdAt: now + i, name: f.name, attempts: 0, nextAt: 0,
+  }));
+  const ids = (await qdb().items.bulkAdd(items, { allKeys: true })) as number[];
+  // memory copy is immediate; the IndexedDB copy (for resuming after reload) is best-effort
+  await Promise.all(ids.map((id, i) => putBlob(id, "original", picked[i])));
   kick();
   return items.length;
 }
@@ -93,13 +164,15 @@ export async function retry(id: number) {
   await qdb().items.update(id, { status: "queued", attempts: 0, nextAt: 0, error: undefined, lease: undefined });
   kick();
 }
-export async function removeItem(id: number) { await qdb().items.delete(id); }
+export async function removeItem(id: number) { await delBlobs(id); await qdb().items.delete(id); }
 
 /** Drop finished items after a day so IndexedDB stays small. */
 async function gc() {
   const cutoff = Date.now() - 86_400_000;
-  await qdb().items.where("createdAt").below(cutoff)
-    .filter((i) => i.status === "done" || i.status === "duplicate").delete();
+  const old = await qdb().items.where("createdAt").below(cutoff)
+    .filter((i) => i.status === "done" || i.status === "duplicate").primaryKeys();
+  for (const id of old) await delBlobs(id);
+  await qdb().items.bulkDelete(old);
 }
 
 function backoff(attempts: number) {
@@ -109,22 +182,25 @@ function backoff(attempts: number) {
 
 class Rejected extends Error { constructor(public code: string) { super(code); } }
 
-async function prepare(it: QueueItem): Promise<Partial<QueueItem>> {
-  const src = it.original!;
+type Prepared = { file: Blob; thumb: Blob; meta: Partial<QueueItem> };
+async function prepare(it: QueueItem, src: Blob): Promise<Prepared> {
   if (it.kind === "photo") {
     const t0 = performance.now();
     const { main, thumb, lqip } = await withTimeout(compressPhoto(src), 30_000, "photo");
-    return {
-      file: main.blob, fileType: main.type, thumb: thumb.blob, thumbType: thumb.type, lqip,
+    return { file: main.blob, thumb: thumb.blob, meta: {
+      fileType: main.type, thumbType: thumb.type, lqip,
       diag: `photo ${((performance.now() - t0) / 1000).toFixed(1)}s · ${(src.size / 1e6).toFixed(1)}MB → ${(main.blob.size / 1e3).toFixed(0)}KB`,
       width: main.width, height: main.height, sha256: await sha256Hex(main.blob),
-    };
+    } };
   }
   // Poster first, from the original: the list shows the real frame right away,
   // and it doesn't depend on the conversion succeeding.
   const early = await withTimeout(posterFromVideo(src), 20_000, "poster").catch(() => null)
     ?? await withTimeout(posterFrame(src), 15_000, "poster-el").catch(() => null);
-  if (early) await qdb().items.update(it.id!, { thumb: early.thumb.blob, thumbType: early.thumb.type, lqip: early.lqip });
+  if (early) {
+    await putBlob(it.id!, "thumb", early.thumb.blob);
+    await qdb().items.update(it.id!, { thumbType: early.thumb.type, lqip: early.lqip, thumbV: Date.now() });
+  }
   const t0 = performance.now();
   // iOS/Android take the hardware decoder away from background pages ("Decoder failure"):
   // stop cleanly when hidden and resume from the start when the guest comes back.
@@ -151,13 +227,13 @@ async function prepare(it: QueueItem): Promise<Partial<QueueItem>> {
   const lqip = poster.lqip;
   const duration = v.duration ?? poster.duration ?? 0;
   if (duration > 181) throw new Rejected("tooLong");
-  return {
-    file: v.blob, fileType: v.blob.type || "video/quicktime", thumb: thumb.blob, thumbType: thumb.type, lqip,
+  return { file: v.blob, thumb: thumb.blob, meta: {
+    fileType: v.blob.type || "video/quicktime", thumbType: thumb.type, lqip,
     width: v.width ?? poster.width, height: v.height ?? poster.height,
     durationS: duration > 0 ? Math.round(duration * 10) / 10 : undefined,
     diag: `${v.diag ?? v.path} · total ${((performance.now() - t0) / 1000).toFixed(0)}s`,
     sha256: await sha256Hex(v.blob),
-  };
+  } };
 }
 
 async function post(url: string, body: unknown) {
@@ -180,13 +256,26 @@ async function processOne(it: QueueItem) {
   const db = qdb();
   const id = it.id!;
   try {
-    // 1. compress (once; the result is persisted)
-    if (!it.file) {
+    // 1. compress (once; the result is kept in memory + best-effort IndexedDB)
+    let file = it.prepared ? await getBlob(id, "file") : undefined;
+    let thumb = it.prepared ? await getBlob(id, "thumb") : undefined;
+    if (!file || !thumb) {
+      const original = await getBlob(id, "original");
+      if (!original) {
+        // the picked file is gone (reload on a browser that can't keep files): ask to pick it again
+        diag(`item lost kind=${it.kind} (original unavailable, idbBlobs=${idbBlobs})`);
+        await db.items.update(id, { status: "rejected", error: "lost" });
+        return;
+      }
       await db.items.update(id, { status: "compressing", progress: 0, error: undefined });
-      const prepared = await prepare(it);
-      await db.items.update(id, { ...prepared, original: undefined });
-      it.diag = prepared.diag;
-      it = { ...it, ...prepared, original: undefined };
+      const prepared = await prepare(it, original);
+      file = prepared.file; thumb = prepared.thumb;
+      await putBlob(id, "file", file);
+      await putBlob(id, "thumb", thumb);
+      const meta = { ...prepared.meta, prepared: true, fileBytes: file.size, thumbBytes: thumb.size, thumbV: Date.now() };
+      await db.items.update(id, meta);
+      await delBlobs(id, ["original"]); // free space; the prepared file is all we need now
+      it = { ...it, ...meta };
     }
 
     // 2. reserve
@@ -196,13 +285,13 @@ async function processOne(it: QueueItem) {
     if (!it.mediaId || !it.tickets) {
       await db.items.update(id, { stage: "reserve" });
       const body = {
-        sha256: it.sha256, kind: it.kind, contentType: it.fileType, bytes: it.file!.size,
-        thumbType: it.thumbType, thumbBytes: it.thumb!.size, width: it.width, height: it.height,
+        sha256: it.sha256, kind: it.kind, contentType: it.fileType, bytes: file.size,
+        thumbType: it.thumbType, thumbBytes: thumb.size, width: it.width, height: it.height,
         durationS: it.durationS, lqip: it.lqip,
       };
       let r = await post("/api/media/reserve", body);
       if (r.status === 401) { await ensureJoined(it.slug, true); r = await post("/api/media/reserve", body); }
-      if (r.j.duplicate) { await db.items.update(id, { status: "duplicate", file: undefined, progress: 1 }); return; }
+      if (r.j.duplicate) { await db.items.update(id, { status: "duplicate", progress: 1 }); await delBlobs(id, ["original", "file"]); return; }
       if (r.j.rejected) throw new Rejected(r.j.rejected);
       if (!r.ok) throw new Error(`reserve_${r.status}${r.j.error ? `:${r.j.error}` : ""}`);
       it.mediaId = r.j.mediaId; it.tickets = r.j.tickets;
@@ -213,14 +302,14 @@ async function processOne(it: QueueItem) {
     await checkpoint(id);
     if (!it.thumbUrl) {
       await db.items.update(id, { stage: "thumb" });
-      it.thumbUrl = await uploadWithTicket(it.tickets!.thumb, it.thumb!);
+      it.thumbUrl = await uploadWithTicket(it.tickets!.thumb, thumb);
       await db.items.update(id, { thumbUrl: it.thumbUrl });
     }
     if (!it.fileUrl) {
       await db.items.update(id, { stage: "file" });
       const start = it.kind === "video" ? 0.5 : 0;
       let lastWrite = 0;
-      it.fileUrl = await uploadWithTicket(it.tickets!.file, it.file!, (f) => {
+      it.fileUrl = await uploadWithTicket(it.tickets!.file, file, (f) => {
         // throttle IndexedDB writes (each one re-renders the list)
         const now = Date.now();
         if (now - lastWrite > 400 || f >= 1) { lastWrite = now; db.items.update(id, { progress: start + f * (1 - start) }); }
@@ -238,7 +327,8 @@ async function processOne(it: QueueItem) {
     }
     if (!c.ok) throw new Error(`complete_${c.status}${c.j.error ? `:${c.j.error}` : ""}`);
     if (it.kind === "video") diag(`video uploaded ${((Date.now() - upStart) / 1000).toFixed(0)}s · ${it.diag ?? ""}`);
-    await db.items.update(id, { status: "done", progress: 1, file: undefined, tickets: undefined,
+    await delBlobs(id, ["original", "file"]); // keep the small thumb for the list
+    await db.items.update(id, { status: "done", progress: 1, tickets: undefined,
       diag: `${it.diag ?? ""} · upload ${((Date.now() - upStart) / 1000).toFixed(0)}s` });
   } catch (e) {
     if (e instanceof LostLease) { diag(`lost lease ${id} (another tab took over)`); return; }
@@ -253,9 +343,14 @@ async function processOne(it: QueueItem) {
       if (code === "limit" || code === "budget") {
         await db.items.update(id, { status: "waiting", error: code, attempts: it.attempts + 1, nextAt: Date.now() + 5 * 60_000 });
       } else {
-        await db.items.update(id, { status: "rejected", error: code, original: undefined });
+        await db.items.update(id, { status: "rejected", error: code });
+        await delBlobs(id, ["original", "file"]);
       }
       return;
+    }
+    const msg = String((e as Error)?.message ?? e);
+    if (/client token|no_reservation|bad_path/i.test(msg)) {
+      await db.items.update(id, { mediaId: undefined, tickets: undefined, thumbUrl: undefined, fileUrl: undefined });
     }
     diag(`item failed kind=${it.kind} stage=${(await db.items.get(id))?.stage ?? "prepare"} err=${String((e as Error)?.message ?? e).slice(0, 200)}`);
     const attempts = it.attempts + 1;
