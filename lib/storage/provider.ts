@@ -24,6 +24,7 @@ export function extFor(contentType: string): string {
     case "image/webp": return "webp";
     case "image/jpeg": return "jpg";
     case "video/mp4": return "mp4";
+    case "video/quicktime": return "mov";
     default: return "bin";
   }
 }

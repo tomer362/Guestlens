@@ -41,7 +41,10 @@ export async function prepareVideo(file: Blob, hooks: CoreHooks = {}): Promise<V
 
   if (!(await canTranscode())) {
     report(`video no-webcodecs-avc @${el()}`);
-    if (file.type === "video/mp4" && file.size <= LIMITS.video.maxBytes) return { blob: file, path: "original" };
+    const t = file.type || "video/quicktime";
+    if ((LIMITS.video.types as readonly string[]).includes(t) && file.size <= LIMITS.video.maxBytes) {
+      return { blob: file.type ? file : new Blob([file], { type: t }), path: "original" };
+    }
     throw new VideoError("tooBig");
   }
 
@@ -58,8 +61,12 @@ export async function prepareVideo(file: Blob, hooks: CoreHooks = {}): Promise<V
   const isAvc = track?.codec === "avc";
   const fitsAsIs = isAvc && shortEdge <= 1080 && file.size <= LIMITS.video.maxBytes
     && (bitrate <= KEEP_BITRATE || file.size <= KEEP_SMALL_BYTES);
-  // Playable-enough to upload untouched if conversion turns out too slow on this device
-  const canFallBackToOriginal = (isAvc || track?.codec === "hevc") && file.size <= LIMITS.video.maxBytes;
+  // The original can be uploaded untouched (iPhone .mov included) when it's H.264/HEVC in a
+  // container we accept and within the size limit: used when remux/transcode fails or is too slow.
+  const origType = file.type || "video/quicktime";
+  const containerOk = (LIMITS.video.types as readonly string[]).includes(origType);
+  const canFallBackToOriginal = (isAvc || track?.codec === "hevc") && containerOk && file.size <= LIMITS.video.maxBytes;
+  const original = () => (file.type ? file : new Blob([file], { type: origType }));
 
   const src = `${track?.codec ?? "?"} ${w}x${h} ${Math.round(fps)}fps ${(bitrate / 1e6).toFixed(1)}Mbps ${Math.round(duration)}s ${(file.size / 1e6).toFixed(0)}MB audio=${audio?.codec ?? "none"}`;
   report(`video probed @${el()} ${src} fitsAsIs=${fitsAsIs}`);
@@ -77,8 +84,20 @@ export async function prepareVideo(file: Blob, hooks: CoreHooks = {}): Promise<V
     const target = new mb.BufferTarget();
     const output = new mb.Output({ format: new mb.Mp4OutputFormat({ fastStart: "in-memory" }), target });
     const inp = new mb.Input({ source: new mb.BlobSource(file), formats: mb.ALL_FORMATS });
+    // Keep ONE audio track, chosen by us: iPhone 16+ add a spatial-audio (APAC) track that no
+    // browser decodes, and Mediabunny's "primary" pick isn't necessarily the normal AAC one.
+    const audios = await inp.getAudioTracks();
+    const rank = (c: string | null) => (c === "aac" ? 0 : c === "opus" ? 1 : c === "mp3" ? 2 : 5);
+    let keepAudio: (typeof audios)[number] | null = null;
+    for (const a of [...audios].sort((x, y) => rank(x.codec) - rank(y.codec))) {
+      if (a.codec && (rank(a.codec) < 5 || (await a.canDecode().catch(() => false)))) { keepAudio = a; break; }
+    }
+    // audio exists but none is usable → don't make a silent copy; the caller uploads the original
+    if (audios.length && !keepAudio) throw new VideoError("unsupported");
     const init = () => mb.Conversion.init({
       input: inp, output,
+      tracks: "all",
+      audio: (t) => (t === keepAudio ? {} : { discard: true }),
       // no video options → packets are copied (lossless, fast)
       video: transcode ? {
         codec: "avc", bitrate: TARGET_BITRATE, keyFrameInterval: 2,
@@ -88,7 +107,6 @@ export async function prepareVideo(file: Blob, hooks: CoreHooks = {}): Promise<V
         ...(fps > 31 ? { frameRate: 30 } : {}),
         ...(shortEdge > 1080 ? (w >= h ? { height: 1080 } : { width: 1080 }) : {}),
       } : undefined,
-      // no audio options → the phone's AAC track is copied as-is when possible
     });
     let conv = await init();
     // Never silently drop audio: if it must be re-encoded and this browser has no AAC encoder
@@ -100,9 +118,11 @@ export async function prepareVideo(file: Blob, hooks: CoreHooks = {}): Promise<V
       report(`video registered wasm aac @${el()}`);
       conv = await init();
     }
-    const dropped = conv.discardedTracks.map((d) => `${d.track.type}:${d.reason}`);
+    const pv = await inp.getPrimaryVideoTrack(), pa = keepAudio;
+    const dropped = conv.discardedTracks.map((d) => `${d.track.type}/${(d.track as { codec?: string | null }).codec ?? "?"}:${d.reason}`);
     report(`video convert start transcode=${transcode} valid=${conv.isValid} dropped=${dropped.join(",") || "-"} @${el()}`);
-    if (!conv.isValid || conv.discardedTracks.some((d) => d.track.type === "audio" || d.track.type === "video")) {
+    // fail only if the PRIMARY video or audio would be lost (never produce a silent/blank file)
+    if (!conv.isValid || conv.discardedTracks.some((d) => d.track === pv || d.track === pa)) {
       throw new VideoError("unsupported");
     }
     let bailed = false;
@@ -139,13 +159,13 @@ export async function prepareVideo(file: Blob, hooks: CoreHooks = {}): Promise<V
   let blob: Blob;
   try {
     const r = await run(!fitsAsIs, !fitsAsIs && canFallBackToOriginal);
-    if (r === "bail") {
-      path = "remux";
-      blob = file.type === "video/mp4" ? file : (await run(false, false)) as Blob;
-      if (file.type === "video/mp4") path = "original";
-    } else blob = r;
+    if (r === "bail") { path = "original"; blob = original(); }
+    else blob = r;
   } catch (e) {
-    if (canFallBackToOriginal && file.type === "video/mp4") { path = "original"; blob = file; }
+    if (canFallBackToOriginal) {
+      report(`video fallback → original (${origType}) after: ${String((e as Error)?.message ?? e).slice(0, 120)}`);
+      path = "original"; blob = original();
+    }
     // a decoder/encoder hiccup (e.g. iOS reclaiming the decoder) is retryable, not a verdict on the file
     else throw e;
   }

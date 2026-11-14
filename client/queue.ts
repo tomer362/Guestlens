@@ -125,7 +125,7 @@ async function prepare(it: QueueItem): Promise<Partial<QueueItem>> {
   const duration = v.duration ?? poster.duration ?? 0;
   if (duration > 181) throw new Rejected("tooLong");
   return {
-    file: v.blob, fileType: "video/mp4", thumb: thumb.blob, thumbType: thumb.type, lqip,
+    file: v.blob, fileType: v.blob.type || "video/quicktime", thumb: thumb.blob, thumbType: thumb.type, lqip,
     width: v.width ?? poster.width, height: v.height ?? poster.height,
     durationS: duration > 0 ? Math.round(duration * 10) / 10 : undefined,
     diag: `${v.diag ?? v.path} · total ${((performance.now() - t0) / 1000).toFixed(0)}s`,
