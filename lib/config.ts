@@ -44,7 +44,7 @@ export function getBudget(): Budget {
 
 /** Per-upload limits, also enforced in the Blob client token. */
 export const LIMITS = {
-  photo: { types: ["image/webp", "image/jpeg"], maxBytes: 2 * MB },
+  photo: { types: ["image/webp", "image/jpeg"], maxBytes: 4 * MB },
   // video/quicktime: iPhone originals uploaded as-is when on-device conversion isn't possible
   // video/webm: realtime MediaRecorder output (Firefox Android & other browsers without WebCodecs)
   // NEXT_PUBLIC_VIDEO_MAX_MB raises the cap on Pro (client + server read the same value)
@@ -57,6 +57,13 @@ export const LIMITS = {
   perGuestItemsPerHour: 200,
   perGuestBytesPerDay: 300 * MB,
 } as const;
+
+/** Video bitrate for a clip of this length: `target`, lowered so the whole file stays under the video size cap. */
+export function videoBitrateFor(durationS: number, target: number): number {
+  if (!(durationS > 0)) return target;
+  const fit = Math.floor((LIMITS.video.maxBytes * 8 * 0.92) / durationS) - 128_000; // 8% headroom, minus audio
+  return Math.max(1_500_000, Math.min(target, fit));
+}
 
 export const GALLERY = {
   pageSize: 60,

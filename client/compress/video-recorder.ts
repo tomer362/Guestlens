@@ -1,10 +1,11 @@
 "use client";
+import { videoBitrateFor } from "@/lib/config";
 /**
  * Realtime re-encode with the browser's own (hardware) recorder, for browsers WITHOUT WebCodecs
  * (Firefox Android, old Chromium) when the original is too big to upload as-is.
  *
  *   hidden <video> (muted) ──draw ≤1080p──▶ canvas.captureStream(30)  ┐
- *   video.captureStream() audio track (not affected by `muted`) ─────┴▶ MediaRecorder ~2.5 Mbps
+ *   video.captureStream() audio track (not affected by `muted`) ─────┴▶ MediaRecorder ≤4 Mbps
  *
  * Takes 1× the clip length, needs no download (vs. ~25 MB / 10–30× slower for ffmpeg.wasm), and
  * the result is repackaged by Mediabunny (packet copy, no WebCodecs) so it has a proper duration
@@ -45,7 +46,7 @@ export async function recordTranscode(
   opts: { maxShortEdge?: number; videoBps?: number; onProgress?: (p: number) => void; signal?: AbortSignal; stallMs?: number } = {},
 ): Promise<RecorderResult> {
   const { maxShortEdge = 1080, onProgress, signal, stallMs = 30_000 } = opts;
-  let videoBps = opts.videoBps ?? 2_500_000;
+  let videoBps = opts.videoBps ?? 4_000_000;
   const mime = recorderMime();
   if (!mime) throw new Error("recorder_unsupported");
 
@@ -74,7 +75,7 @@ export async function recordTranscode(
     if (!Number.isFinite(duration) || duration <= 0) throw new Error("recorder_bad_duration");
     // never spend more bits than the source had: re-encoding must not make the file bigger
     const srcBps = (file.size * 8) / duration;
-    videoBps = Math.max(400_000, Math.min(videoBps, srcBps * 0.75 - 128_000));
+    videoBps = Math.max(400_000, Math.min(videoBitrateFor(duration, videoBps), srcBps * 0.75 - 128_000));
     const sw = v.videoWidth, sh = v.videoHeight;
     const s = Math.min(1, maxShortEdge / Math.min(sw, sh));
     const w = Math.round((sw * s) / 2) * 2, h = Math.round((sh * s) / 2) * 2;

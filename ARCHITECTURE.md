@@ -37,7 +37,7 @@ Guest phone (PWA)
   │ 1. POST /api/join {slug, name, pin?}  ──►  set guest cookie, insert guests row
   │
   │ 2. pick/shoot media
-  │    └─ compress on device: photo→WebP 2048px q75 · video→1080p H.264 2.5 Mbps
+  │    └─ compress on device: photo→WebP 2560px q85 · video→1080p H.264 ≤4 Mbps
   │    └─ make thumbnail (400 px WebP); for video, poster frame = thumbnail
   │    └─ SHA-256 of compressed file → enqueue in IndexedDB
   │
@@ -57,8 +57,8 @@ Guest phone (PWA)
 ## 4. Upload pipeline (client)
 
 1. **Select**: `<input type="file" accept="image/*,video/*" multiple>` (plus the camera via `capture`).
-2. **Compress photo**: decode with `createImageBitmap` (handles EXIF orientation), resize to 2048 px on the long edge, encode WebP q0.75 (JPEG fallback on older Safari). Re-encoding drops EXIF/GPS automatically. Measured on real 16 MP phone photos: 6.5 MB → 578–643 KB.
-3. **Compress video**: Mediabunny `Conversion` to MP4, H.264, max 1080p, ~2.5 Mbps video + 96 kbps AAC. Measured on real 1080p clips: ~15 MB per 45 s. Cap clip length at 3 min.
+2. **Compress photo**: decode with `createImageBitmap` (handles EXIF orientation), resize to 2560 px on the long edge, encode WebP q0.85 (JPEG fallback on older Safari). Re-encoding drops EXIF/GPS automatically. Measured on real 16 MP phone photos: 6.5 MB → 578–643 KB.
+3. **Compress video**: Mediabunny `Conversion` to MP4, H.264, max 1080p, 4 Mbps video (lowered for long clips so they fit the size cap) + 96 kbps AAC. Measured on real 1080p clips: ~15 MB per 45 s. Cap clip length at 3 min.
    - No WebCodecs → reject videos over 50 MB with a friendly message (v1 has no server encoder and only 1 GB of storage).
 4. **Thumbnail**: 400 px WebP (~25–35 KB); for video, grab a frame at ~1 s via `<video>` + canvas.
 5. **Hash**: SHA-256 of the compressed file (dedup).

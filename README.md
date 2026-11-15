@@ -10,7 +10,7 @@ A wedding photo/video PWA. Guests scan a QR code, see a short animated walkthrou
 | Hebrew/English with RTL/LTR, no flash (language cookie read on the server) | `lib/i18n/*`, `components/LangToggle.tsx` |
 | Install with the fewest taps, per platform | `lib/pwa/platform.ts`, `components/onboarding/InstallGuide.tsx` |
 | Per-event manifest (installed icon opens that event) | `app/e/[slug]/manifest.webmanifest/route.ts` |
-| Photo → 2048 px WebP q75; video → H.264 ≤1080p 2.5 Mbps (Mediabunny, lazy-loaded) | `client/compress/*` |
+| Photo → 2560 px WebP q85; video → H.264 ≤1080p ≤4 Mbps (Mediabunny, lazy-loaded) | `client/compress/*` |
 | Persistent upload queue (IndexedDB, backoff + jitter, resumes after reload, one tab at a time via Web Locks) | `client/queue.ts` |
 | reserve → client token → direct upload → complete (+ `onUploadCompleted` backup) | `app/api/media/*`, `app/api/blob/token` |
 | Gallery: keyset pages + CDN-cached polling | `app/api/gallery`, `components/gallery/Gallery.tsx` |
