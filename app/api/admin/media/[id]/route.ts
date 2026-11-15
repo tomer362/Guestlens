@@ -3,7 +3,9 @@ import { and, eq, inArray } from "drizzle-orm";
 import { db, schema } from "@/lib/db/client";
 import { getAdmin } from "@/lib/auth";
 import { err, json, parse } from "@/lib/http";
+import { after } from "next/server";
 import { bumpVersion } from "@/lib/media";
+import { refreshPeople } from "@/lib/faces/store";
 
 const Body = z.object({ hidden: z.boolean() });
 
@@ -18,5 +20,6 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
     .returning({ id: schema.media.id });
   if (!r.length) return err(404, "not_found");
   await bumpVersion(a.eid); // guests' feeds drop/restore it within one poll
+  after(() => refreshPeople(a.eid).catch((e) => console.error("[faces] refresh", e))); // people counts skip hidden items
   return json({ ok: true });
 }

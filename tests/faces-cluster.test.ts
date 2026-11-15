@@ -1,0 +1,129 @@
+import { describe, expect, it } from "vitest";
+import { chineseWhispers, decideIncremental, knnGraph, regroup, NEW_PREFIX, type ClusterConfig, type RFace } from "@/lib/faces/cluster";
+import { fromPgVector, l2normalize, toPgVector } from "@/lib/faces/vec";
+
+const cfg: ClusterConfig = { assignSim: 0.4, minFaces: 3, seedQuality: 0.45, neighbours: 10 };
+
+/** Deterministic gaussian-ish noise. */
+function rng(seed: number) {
+  return () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 2 ** 32 - 0.5; };
+}
+/** `people` identities × `per` faces each: unit vectors around random centres (sim within ≈0.6–0.8, across ≈0). */
+function synth(people: number, per: number, noise = 0.06, seed = 7) {
+  const r = rng(seed);
+  const centres = Array.from({ length: people }, () => l2normalize(Float32Array.from({ length: 128 }, r)));
+  const faces: { vec: Float32Array; who: number }[] = [];
+  for (let p = 0; p < people; p++) for (let i = 0; i < per; i++) {
+    faces.push({ who: p, vec: l2normalize(Float32Array.from(centres[p], (x) => x + r() * noise * 6)) });
+  }
+  return faces;
+}
+
+describe("decideIncremental", () => {
+  const f = { id: "x", quality: 0.8 };
+  it("joins the person most close neighbours belong to", () => {
+    const d = decideIncremental(f, [
+      { id: "a", sim: 0.7, personId: "P", quality: 0.9 }, { id: "b", sim: 0.6, personId: "P", quality: 0.9 },
+      { id: "c", sim: 0.65, personId: "Q", quality: 0.9 }, { id: "d", sim: 0.2, personId: "Q", quality: 0.9 },
+    ], cfg);
+    expect(d).toEqual({ kind: "assign", personId: "P" });
+  });
+  it("ignores neighbours below the similarity threshold", () => {
+    expect(decideIncremental(f, [{ id: "a", sim: 0.3, personId: "P", quality: 0.9 }], cfg)).toEqual({ kind: "none" });
+  });
+  it("starts a person once enough good unassigned faces agree", () => {
+    const d = decideIncremental(f, [
+      { id: "a", sim: 0.7, personId: null, quality: 0.9 }, { id: "b", sim: 0.6, personId: null, quality: 0.5 },
+      { id: "c", sim: 0.6, personId: null, quality: 0.1 },
+    ], cfg);
+    expect(d).toEqual({ kind: "create", faceIds: ["x", "a", "b", "c"] });
+  });
+  it("blurry faces never start a person", () => {
+    const n = [{ id: "a", sim: 0.7, personId: null, quality: 0.1 }, { id: "b", sim: 0.7, personId: null, quality: 0.1 }];
+    expect(decideIncremental(f, n, cfg)).toEqual({ kind: "none" });
+    expect(decideIncremental({ id: "x", quality: 0.1 }, [...n, { id: "c", sim: 0.7, personId: null, quality: 0.9 }], cfg)).toEqual({ kind: "none" });
+  });
+});
+
+describe("knnGraph + chineseWhispers", () => {
+  it("separates synthetic identities", () => {
+    const faces = synth(6, 12);
+    const adj = knnGraph(faces.map((f) => f.vec), 10, 0.4);
+    const labels = chineseWhispers(adj, faces.map((_, i) => `f:${i}`), faces.map(() => false), faces.map(() => undefined));
+    // purity: every label holds one identity, every identity one label
+    const byLabel = new Map<string, Set<number>>();
+    labels.forEach((l, i) => { (byLabel.get(l) ?? byLabel.set(l, new Set()).get(l)!).add(faces[i].who); });
+    for (const s of byLabel.values()) expect(s.size).toBe(1);
+    expect(byLabel.size).toBe(6);
+  });
+  it("never links two faces from the same photo", () => {
+    const faces = synth(1, 4, 0.02);
+    const adj = knnGraph(faces.map((f) => f.vec), 10, 0.4, ["m1", "m1", "m2", "m3"]);
+    expect(adj[0].some((e) => e.j === 1)).toBe(false);
+    expect(adj[0].some((e) => e.j === 2)).toBe(true);
+  });
+  it("never moves fixed nodes and respects rejections", () => {
+    const faces = synth(1, 6);
+    const adj = knnGraph(faces.map((f) => f.vec), 10, 0.4);
+    const initial = ["P", "P", "P", "f:3", "f:4", "f:5"];
+    const fixed = [true, false, false, false, false, true];
+    initial[5] = "Q";
+    const rejected = [undefined, undefined, undefined, new Set(["P"]), undefined, undefined];
+    const l = chineseWhispers(adj, initial, fixed, rejected);
+    expect(l[0]).toBe("P");
+    expect(l[5]).toBe("Q");
+    expect(l[3]).not.toBe("P");
+  });
+});
+
+describe("regroup", () => {
+  const make = (people: number, per: number) => synth(people, per).map((f, i): RFace & { who: number } => ({
+    id: `face${i}`, vec: f.vec, quality: 0.8, personId: null, locked: false, who: f.who,
+  }));
+
+  it("creates one new person per identity", () => {
+    const faces = make(4, 8);
+    const out = regroup(faces, new Map(), cfg);
+    const targets = new Set(out.values());
+    expect([...targets].every((t) => t?.startsWith(NEW_PREFIX))).toBe(true);
+    expect(targets.size).toBe(4);
+  });
+
+  it("keeps existing person ids (stable across regroups)", () => {
+    const faces = make(3, 8);
+    faces.forEach((f) => { if (f.who === 0) f.personId = "alice"; });
+    faces[1].personId = null; // a new face of alice
+    const out = regroup(faces, new Map(), cfg);
+    for (const f of faces.filter((f) => f.who === 0)) expect(out.get(f.id)).toBe("alice");
+  });
+
+  it("merges split clusters of the same identity into the bigger one", () => {
+    const faces = make(1, 10);
+    faces.forEach((f, i) => { f.personId = i < 7 ? "A" : "B"; });
+    const out = regroup(faces, new Map(), cfg);
+    expect(new Set(out.values())).toEqual(new Set(["A"]));
+  });
+
+  it("locked faces stay; a rejected face leaves its person", () => {
+    const faces = make(1, 6);
+    faces.forEach((f) => { f.personId = "A"; });
+    faces[0].locked = true;
+    const out = regroup(faces, new Map([["face3", new Set(["A"])]]), cfg);
+    expect(out.get("face0")).toBe("A");
+    expect(out.get("face3")).not.toBe("A");
+  });
+
+  it("too few faces don't become a person", () => {
+    const faces = make(1, 2);
+    const out = regroup(faces, new Map(), cfg);
+    expect([...out.values()]).toEqual([null, null]);
+  });
+});
+
+describe("pgvector text", () => {
+  it("round-trips", () => {
+    const v = l2normalize(Float32Array.from({ length: 128 }, (_, i) => Math.sin(i)));
+    const back = fromPgVector(toPgVector(v));
+    for (let i = 0; i < 128; i++) expect(back[i]).toBeCloseTo(v[i], 4);
+  });
+});

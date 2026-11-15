@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { AnimatePresence, m } from "motion/react";
-import { Camera, CircleHelp, Download, Images, X } from "lucide-react";
+import { Camera, CircleHelp, Download, Images, UsersRound, X } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useI18n } from "@/lib/i18n/client";
 import { LangToggle } from "./LangToggle";
@@ -16,10 +16,16 @@ import { isStandalone } from "@/lib/pwa/install";
 const Loading = () => <div className="grid min-h-[50vh] place-items-center"><span className="size-8 animate-spin rounded-full border-2 border-rose border-t-transparent" /></div>;
 const UploadScreen = dynamic(() => import("./upload/UploadScreen").then((m) => m.UploadScreen), { loading: Loading });
 const Gallery = dynamic(() => import("./gallery/Gallery").then((m) => m.Gallery), { loading: Loading });
+const People = dynamic(() => import("./people/People").then((m) => m.People), { loading: Loading });
+const Person = dynamic(() => import("./people/People").then((m) => m.Person), { loading: Loading });
 const Onboarding = dynamic(() => import("./onboarding/Onboarding").then((m) => m.Onboarding), { ssr: false });
 const InstallGuide = dynamic(() => import("./onboarding/InstallGuide").then((m) => m.InstallGuide), { ssr: false });
 
-export function EventApp({ slug, eventName, uploadOpen, view }: { slug: string; eventName: string; uploadOpen: boolean; view: "upload" | "gallery" }) {
+export type EventView = "upload" | "gallery" | "people" | "person";
+
+export function EventApp({ slug, eventName, uploadOpen, view, facesEnabled = false, personId }: {
+  slug: string; eventName: string; uploadOpen: boolean; view: EventView; facesEnabled?: boolean; personId?: string;
+}) {
   const { t } = useI18n();
   const [onboarding, setOnboarding] = useState<boolean | null>(null);
   const [standalone, setStandalone] = useState(false);
@@ -54,18 +60,26 @@ export function EventApp({ slug, eventName, uploadOpen, view }: { slug: string; 
       </header>
 
       <main className="flex-1 px-4 pb-28">
-        {view === "upload"
-          ? <UploadScreen onHandle={onUploadHandle} slug={slug} uploadOpen={uploadOpen} />
+        {view === "upload" ? <UploadScreen onHandle={onUploadHandle} slug={slug} uploadOpen={uploadOpen} />
+          : view === "people" ? <People slug={slug} />
+          : view === "person" && personId ? <Person slug={slug} personId={personId} />
           : <Gallery slug={slug} />}
       </main>
 
       <nav className="safe-bottom fixed inset-x-0 bottom-0 z-30 mx-auto flex max-w-lg justify-around bg-white/90 px-6 pt-2 shadow-[0_-4px_20px_rgba(0,0,0,0.05)] backdrop-blur">
-        {([["upload", `/e/${slug}`, Camera, t.common.camera], ["gallery", `/e/${slug}/gallery`, Images, t.common.gallery]] as const).map(([k, href, Icon, label]) => (
-          <Link key={k} href={href} className={`relative flex flex-col items-center gap-0.5 px-6 py-1 text-xs font-medium ${view === k ? "text-rose-deep" : "text-muted"}`}>
-            <Icon className="size-6" aria-hidden />{label}
-            {view === k && <m.span layoutId="navdot" className="absolute -top-2 h-1 w-8 rounded-full bg-rose-deep" />}
-          </Link>
-        ))}
+        {([
+          ["upload", `/e/${slug}`, Camera, t.common.camera],
+          ["gallery", `/e/${slug}/gallery`, Images, t.common.gallery],
+          ...(facesEnabled ? [["people", `/e/${slug}/people`, UsersRound, t.common.people] as const] : []),
+        ] as const).map(([k, href, Icon, label]) => {
+          const active = view === k || (k === "people" && view === "person");
+          return (
+            <Link key={k} href={href} className={`relative flex flex-col items-center gap-0.5 py-1 text-xs font-medium ${facesEnabled ? "px-4" : "px-6"} ${active ? "text-rose-deep" : "text-muted"}`}>
+              <Icon className="size-6" aria-hidden />{label}
+              {active && <m.span layoutId="navdot" className="absolute -top-2 h-1 w-8 rounded-full bg-rose-deep" />}
+            </Link>
+          );
+        })}
       </nav>
       </div>
 

@@ -17,6 +17,7 @@ A wedding photo/video PWA. Guests scan a QR code, see a short animated walkthrou
 | Phone-only first-time setup (tables + event) | `/setup` (needs `SETUP_KEY`) |
 | Admin: usage meters, open/close uploads, private album, PIN, hide, URL export, printable QR | `/admin/<slug>` |
 | Offline app shell | `public/sw.js` |
+| **People**: faces grouped per person, server-side, off until the admin turns it on ([FACES.md](FACES.md)) | `lib/faces/*`, `/e/<slug>/people`, admin → People |
 
 ### How installing works on each platform
 - **Android / Chromium**: we catch `beforeinstallprompt` in an inline `<head>` script, so it's never missed. The guest gets one **Install** button (one tap plus the system confirm).

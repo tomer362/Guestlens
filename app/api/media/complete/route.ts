@@ -4,6 +4,10 @@ import { db, schema } from "@/lib/db/client";
 import { getGuest } from "@/lib/auth";
 import { storage } from "@/lib/storage";
 import { err, json, parse } from "@/lib/http";
+import { afterReady } from "@/lib/media";
+
+// covers the background face scan that runs after the response (lib/faces/jobs.ts)
+export const maxDuration = 60;
 
 const Body = z.object({ mediaId: z.string().uuid(), url: z.string().url(), thumbUrl: z.string().url() });
 
@@ -29,7 +33,10 @@ export async function POST(req: Request) {
       update events set media_version = media_version + 1 where id in (select event_id from u) returning 1
     )
     select count(*)::int as n from u`);
-  if (Number((r.rows[0] as { n: number }).n) > 0) return json({ ok: true });
+  if (Number((r.rows[0] as { n: number }).n) > 0) {
+    afterReady(b.mediaId);
+    return json({ ok: true });
+  }
 
   // Not updated: find out why (rare path)
   const [m] = await db().select({ status: schema.media.status }).from(schema.media)

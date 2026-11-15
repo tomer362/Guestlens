@@ -165,6 +165,7 @@ Rules that save operations:
 - Guest cookie: HTTP-only, `SameSite=Lax`, 30-day expiry, signed with `JWT_SECRET`. Admin uses a separate cookie and key.
 - Rate limits per guest: e.g. 200 items/hour, 300 MB/day, enforced in `reserve`.
 - No server-side decoding of media, so no image/video parser attack surface on our side. Client-made thumbs are trusted for display only; admins can hide anything.
+  - Exception: when an event turns on **People** (face grouping, [FACES.md](FACES.md)), the server decodes uploaded photos and video posters to find faces. It accepts only WebP/JPEG up to 9 MP, decodes with libvips (`sharp`), and does nothing for events that leave People off.
 - PIN and admin key stored as hashes (argon2/bcrypt).
 - `upload_open=false` closes the event instantly.
 
@@ -236,7 +237,11 @@ Env vars: `BLOB_READ_WRITE_TOKEN`, `DATABASE_URL`, `JWT_SECRET`, `ADMIN_KEY_HASH
 7. Rehearsal with friends/family; compare our usage meter with Vercel's dashboard.
 8. Decide on option A or B (§9) and switch the provider.
 
-## 12. Open questions
+## 12. People (face grouping)
+
+See [FACES.md](FACES.md): the options compared, and the server-side design that works even when the guest pockets the phone right after uploading.
+
+## 13. Open questions
 
 - Is it OK that the full-quality originals aren't kept?
 - Photo quality: keep q75 / 2048 px (~600 KB) or go to ~400 KB?

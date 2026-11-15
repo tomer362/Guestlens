@@ -4,9 +4,10 @@ import { Download, Eye, EyeOff, Lock, Printer } from "lucide-react";
 import QRCode from "qrcode";
 import { useGallery } from "@/components/gallery/Gallery";
 import { LangToggle } from "@/components/LangToggle";
+import { PeopleAdmin } from "./PeopleAdmin";
 
 type Usage = { plan: string; puts: number; storageBytes: number; budget: { puts: number; storageBytes: number }; counts: { status: string; kind: string; n: number; bytes: number }[]; guests: number };
-type Ev = { name: string; uploadOpen: boolean; galleryPublic: boolean; hasPin: boolean };
+type Ev = { name: string; uploadOpen: boolean; galleryPublic: boolean; facesEnabled: boolean; hasPin: boolean };
 
 const mb = (b: number) => `${(b / 1024 / 1024).toFixed(0)} MB`;
 
@@ -100,6 +101,8 @@ export function Admin({ slug }: { slug: string }) {
           </div>
         </section>
       )}
+
+      <PeopleAdmin enabled={ev.facesEnabled} onToggle={(on) => patch({ facesEnabled: on })} />
 
       <Moderation slug={slug} />
     </div>

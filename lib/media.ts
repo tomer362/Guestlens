@@ -1,3 +1,4 @@
+import { after } from "next/server";
 import { and, eq, sql } from "drizzle-orm";
 import { db, schema } from "./db/client";
 import type { UploadPart } from "./storage/provider";
@@ -7,7 +8,10 @@ export async function markPart(mediaId: string, part: UploadPart, url: string) {
   const set = part === "file" ? { url } : { thumbUrl: url };
   await db().update(schema.media).set(set)
     .where(and(eq(schema.media.id, mediaId), sql`${schema.media.status} in ('reserved','ready')`));
-  return markReadyIfComplete(mediaId);
+  const ready = await markReadyIfComplete(mediaId);
+  // the webhook path: the phone may already be in a pocket, the server still scans for faces
+  if (ready) afterReady(mediaId);
+  return ready;
 }
 
 /**
@@ -27,7 +31,22 @@ export async function markReadyIfComplete(mediaId: string) {
   return r.rows.length > 0;
 }
 
-/** Bump the visible-set version (hide/unhide, deletes). */
+/** Bump the visible-set version (hide/unhide, deletes); people counts follow the visible set too. */
 export async function bumpVersion(eventId: string) {
-  await db().execute(sql`update events set media_version = media_version + 1 where id = ${eventId}`);
+  await db().execute(sql`update events set media_version = media_version + 1, people_version = people_version + 1 where id = ${eventId}`);
+}
+
+/**
+ * An item just became visible: queue its face scan and drain the queue once the response has
+ * been sent (FACES.md §1). Safe to call from any route; does nothing unless the event has faces on.
+ */
+export function afterReady(mediaId: string) {
+  after(async () => {
+    try {
+      const { enqueueFaceJob, drainFaceJobs } = await import("./faces/jobs");
+      if (await enqueueFaceJob(mediaId)) await drainFaceJobs();
+    } catch (e) {
+      console.error("[faces] afterReady", e);
+    }
+  });
 }

@@ -3,12 +3,9 @@ import { db, schema } from "@/lib/db/client";
 import { getAdmin } from "@/lib/auth";
 import { GALLERY } from "@/lib/config";
 import { err, eventBy, json } from "@/lib/http";
+import { cursorOf, galleryCols, toGalleryItem } from "@/lib/gallery";
 
-export type GalleryItem = {
-  id: string; kind: "photo" | "video"; url: string; thumbUrl: string;
-  w: number | null; h: number | null; d: number | null; by: string | null; at: string; hidden?: boolean;
-  /** inline blur placeholder */ p?: string;
-};
+export type { GalleryItem } from "@/lib/gallery";
 
 /**
  * GET /api/gallery?slug=…            newest page
@@ -37,11 +34,7 @@ export async function GET(req: Request) {
   const statuses = admin ? (["ready", "hidden"] as const) : (["ready"] as const);
   const base = and(eq(m.eventId, event.id), inArray(m.status, [...statuses]));
 
-  // only what the response uses
-  const cols = {
-    id: m.id, kind: m.kind, url: m.url, thumbUrl: m.thumbUrl, width: m.width, height: m.height,
-    durationS: m.durationS, guestName: m.guestName, readyAt: m.readyAt, status: m.status, lqip: m.lqip,
-  };
+  const cols = galleryCols;
   const since = q.get("since");
   const before = q.get("before");
   let rows;
@@ -58,12 +51,9 @@ export async function GET(req: Request) {
     rows = await db().select(cols).from(m).where(cond).orderBy(desc(m.readyAt), desc(m.id)).limit(GALLERY.pageSize);
   }
 
-  const items: GalleryItem[] = rows.map((r) => ({
-    id: r.id, kind: r.kind, url: r.url!, thumbUrl: r.thumbUrl!, w: r.width, h: r.height, d: r.durationS,
-    by: r.guestName, at: r.readyAt!.toISOString(), ...(r.lqip ? { p: r.lqip } : {}), ...(admin ? { hidden: r.status === "hidden" } : {}),
-  }));
+  const items = rows.map((r) => toGalleryItem(r, !!admin));
   const last = rows[rows.length - 1];
-  const nextBefore = !since && rows.length === GALLERY.pageSize && last ? `${last.readyAt!.toISOString()}_${last.id}` : null;
+  const nextBefore = !since && rows.length === GALLERY.pageSize && last ? cursorOf(last) : null;
 
   // Keyed by feed version (&v=…): a given version's page never changes, so it can sit in the CDN
   // and be shared by every guest; a new version is a new URL, so it is never stale.

@@ -19,5 +19,5 @@ export default async function Page({ params }: P) {
   const { slug } = await params;
   const e = await eventBy("slug", slug);
   if (!e) notFound();
-  return <EventApp slug={e.slug} eventName={e.name} uploadOpen={e.uploadOpen} view="gallery" />;
+  return <EventApp slug={e.slug} eventName={e.name} uploadOpen={e.uploadOpen} facesEnabled={e.facesEnabled} view="gallery" />;
 }
