@@ -23,6 +23,7 @@ export function ensureJoined(slug: string, force = false): Promise<boolean> {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ slug, name: savedName() || null }),
+    signal: AbortSignal.timeout?.(15_000), // a hung join must never hold up the upload queue
   }).then((r) => r.ok).catch(() => false);
   joining.then((ok) => { if (!ok) joining = null; });
   return joining;

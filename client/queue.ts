@@ -119,11 +119,15 @@ export async function getBlob(id: number, part: BlobPart): Promise<Blob | undefi
   const m = mem.get(key);
   if (m) return m;
   try {
-    const r = await qdb().blobs.get(key);
-    if (!r?.blob) return undefined;
-    await r.blob.slice(0, 1).arrayBuffer(); // prove it's still readable
-    mem.set(key, r.blob);
-    return r.blob;
+    // bounded: a blob whose write was cut short (browser closed mid-save) can hang a read forever
+    const blob = await withTimeout((async () => {
+      const r = await qdb().blobs.get(key);
+      if (!r?.blob) return undefined;
+      await r.blob.slice(0, 1).arrayBuffer(); // prove it's still readable
+      return r.blob;
+    })(), 10_000, "blob");
+    if (blob) mem.set(key, blob);
+    return blob;
   } catch {
     return undefined;
   }
@@ -138,6 +142,8 @@ const ACTIVE: ItemStatus[] = ["queued", "compressing", "uploading", "waiting"];
 const CONCURRENCY = 2;
 const LEASE_MS = 30_000;
 const HEARTBEAT_MS = 8_000;
+/** An item that shows no sign of life this long is abandoned and retried (every step has its own, shorter timeout). */
+const STUCK_MS = 3 * 60_000;
 /**
  * This tab's identity for leases. Kept in sessionStorage so a reload of the same tab still owns
  * its leases (otherwise its own unfinished items would wait out a 30 s lease after every reload).
@@ -152,7 +158,32 @@ const TAB = (() => {
   } catch { return fresh(); }
 })();
 
-const leaseFree = (i: QueueItem, now = Date.now()) => !i.lease || i.lease.until < now || i.lease.owner === TAB;
+/**
+ * Liveness: every tab holds a Web Lock named after its id for as long as it exists. The browser
+ * drops it the instant the tab dies (closed, killed), so a lease whose owner holds no lock is dead
+ * and can be taken at once. A frozen tab keeps its lock; its lease still runs out after LEASE_MS.
+ */
+const tabLock = (owner: string) => `gl-tab-${owner}`;
+type Locks = { request?: LockManager["request"]; query?: LockManager["query"] };
+const locks = (): Locks | undefined => (typeof navigator !== "undefined" ? (navigator as Navigator & { locks?: Locks }).locks : undefined);
+let holdingTabLock = false;
+function holdTabLock() {
+  if (holdingTabLock) return;
+  holdingTabLock = true;
+  // held until this page goes away (a same-tab reload may wait a moment for the old page's copy)
+  locks()?.request?.(tabLock(TAB), () => new Promise<never>(() => {}))?.catch(() => {});
+}
+/** Ids of tabs that are alive right now, or null where Web Locks aren't available. */
+async function liveTabs(): Promise<Set<string> | null> {
+  try {
+    const q = await locks()?.query?.();
+    if (!q) return null;
+    return new Set([...(q.held ?? []), ...(q.pending ?? [])].map((l) => l.name ?? "").filter((n) => n.startsWith("gl-tab-")).map((n) => n.slice(7)));
+  } catch { return null; }
+}
+
+const leaseFree = (i: QueueItem, now = Date.now(), alive: Set<string> | null = null) =>
+  !i.lease || i.lease.until < now || i.lease.owner === TAB || (!!alive && !alive.has(i.lease.owner));
 
 /** Resolve within `ms` or reject with a labelled timeout (a hung await must never block a lane). */
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
@@ -215,7 +246,10 @@ class Rejected extends Error { constructor(public code: string) { super(code); }
 const looksHeicName = (it: QueueItem) => /\.hei[cf]$/i.test(it.name ?? "");
 
 type Prepared = { file: Blob; thumb: Blob; meta: Partial<QueueItem> };
-async function prepare(it: QueueItem, src: Blob): Promise<Prepared> {
+/** One processing run of one item, watched by the heartbeat. */
+type Run = { lastBeat: number; abandoned: boolean };
+async function prepare(it: QueueItem, src: Blob, run: Run): Promise<Prepared> {
+  const beat = () => { run.lastBeat = Date.now(); };
   if (it.kind === "photo") {
     const t0 = performance.now();
     let r: Awaited<ReturnType<typeof compressPhoto>>;
@@ -252,8 +286,8 @@ async function prepare(it: QueueItem, src: Blob): Promise<Prepared> {
     if (document.visibilityState === "hidden") throw new PausedError();
     // stalled twice already on this device → just upload the original if it's usable
     const forceOriginal = it.attempts >= 2 && /stalled_video/.test(it.error ?? "");
-    v = await compressVideo(src, (p) => qdb().items.update(it.id!, { progress: p * 0.5 }),
-      (info) => qdb().items.update(it.id!, { diag: info }), ctrl.signal, forceOriginal);
+    v = await compressVideo(src, (p) => { beat(); return qdb().items.update(it.id!, { progress: p * 0.5 }); },
+      (info) => { beat(); return qdb().items.update(it.id!, { diag: info }); }, ctrl.signal, forceOriginal);
   } finally {
     document.removeEventListener("visibilitychange", onVis);
   }
@@ -292,9 +326,16 @@ async function checkpoint(id: number) {
   if (!cur || (cur.lease && cur.lease.owner !== TAB && cur.lease.until > Date.now())) throw new LostLease();
 }
 
-async function processOne(it: QueueItem) {
-  const db = qdb();
+async function processOne(it: QueueItem, run: Run) {
+  const realDb = qdb();
   const id = it.id!;
+  // every write marks the item alive for the watchdog; once abandoned, a late-waking run writes nothing
+  const upd = (changes: Partial<QueueItem>) => {
+    if (run.abandoned) throw new LostLease();
+    run.lastBeat = Date.now();
+    return qdb().items.update(id, changes);
+  };
+  const db = { items: { update: (_id: number, c: Partial<QueueItem>) => upd(c), get: (k: number) => realDb.items.get(k) } };
   try {
     // 1. compress (once; the result is kept in memory + best-effort IndexedDB)
     let file = it.prepared ? await getBlob(id, "file") : undefined;
@@ -308,7 +349,7 @@ async function processOne(it: QueueItem) {
         return;
       }
       await db.items.update(id, { status: "compressing", progress: 0, error: undefined });
-      const prepared = await prepare(it, original);
+      const prepared = await prepare(it, original, run);
       file = prepared.file; thumb = prepared.thumb;
       await putBlob(id, "file", file);
       await putBlob(id, "thumb", thumb);
@@ -342,7 +383,7 @@ async function processOne(it: QueueItem) {
     await checkpoint(id);
     if (!it.thumbUrl) {
       await db.items.update(id, { stage: "thumb" });
-      it.thumbUrl = await uploadWithTicket(it.tickets!.thumb, thumb);
+      it.thumbUrl = await uploadWithTicket(it.tickets!.thumb, thumb, () => { run.lastBeat = Date.now(); });
       await db.items.update(id, { thumbUrl: it.thumbUrl });
     }
     if (!it.fileUrl) {
@@ -352,7 +393,8 @@ async function processOne(it: QueueItem) {
       it.fileUrl = await uploadWithTicket(it.tickets!.file, file, (f) => {
         // throttle IndexedDB writes (each one re-renders the list)
         const now = Date.now();
-        if (now - lastWrite > 400 || f >= 1) { lastWrite = now; db.items.update(id, { progress: start + f * (1 - start) }); }
+        run.lastBeat = now;
+        if (now - lastWrite > 400 || f >= 1) { lastWrite = now; db.items.update(id, { progress: start + f * (1 - start) }).catch(() => {}); }
       });
       await db.items.update(id, { fileUrl: it.fileUrl });
     }
@@ -402,19 +444,19 @@ async function processOne(it: QueueItem) {
       attempts, nextAt: Date.now() + backoff(attempts),
     });
   } finally {
-    await db.items.where("id").equals(id).modify((i) => { if (i.lease?.owner === TAB) delete i.lease; }).catch(() => {});
+    if (!run.abandoned) await realDb.items.where("id").equals(id).modify((i) => { if (i.lease?.owner === TAB) delete i.lease; }).catch(() => {});
   }
 }
 
 /** Atomically take an item for this tab (two tabs can never work on the same item). */
-async function claim(id: number): Promise<boolean> {
+async function claim(id: number, alive: Set<string> | null): Promise<boolean> {
   const db = qdb();
   return db.transaction("rw", db.items, async () => {
     const cur = await db.items.get(id);
     const now = Date.now();
     if (!cur || !ACTIVE.includes(cur.status) || cur.nextAt > now) return false;
-    if (!leaseFree(cur, now)) return false;
-    if (cur.lease && cur.lease.owner !== TAB) diag(`takeover ${id} from ${cur.lease.owner} (expired ${((now - cur.lease.until) / 1000).toFixed(0)}s ago)`);
+    if (!leaseFree(cur, now, alive)) return false;
+    if (cur.lease && cur.lease.owner !== TAB) diag(`takeover ${id} from ${cur.lease.owner} (${cur.lease.until < now ? `expired ${((now - cur.lease.until) / 1000).toFixed(0)}s ago` : "tab gone"})`);
     // an expired lease means its tab died or froze mid-way: show it as queued again
     await db.items.update(id, {
       lease: { owner: TAB, until: now + LEASE_MS },
@@ -427,7 +469,7 @@ async function claim(id: number): Promise<boolean> {
 let running = false;
 let again = false;
 let timer: ReturnType<typeof setTimeout> | undefined;
-const inFlight = new Map<number, { kind: QueueItem["kind"]; p: Promise<void> }>();
+const inFlight = new Map<number, { kind: QueueItem["kind"]; p: Promise<void>; run: Run; release: () => void }>();
 
 // keep our leases alive while we work
 let heartbeat: ReturnType<typeof setInterval> | undefined;
@@ -435,8 +477,21 @@ function ensureHeartbeat() {
   if (heartbeat) return;
   heartbeat = setInterval(() => {
     if (!inFlight.size) { clearInterval(heartbeat); heartbeat = undefined; return; }
+    const now = Date.now();
+    // watchdog: a run that hung on some await would otherwise keep its lease alive forever
+    for (const [id, f] of inFlight) {
+      if (now - f.run.lastBeat < STUCK_MS) continue;
+      f.run.abandoned = true;
+      inFlight.delete(id);
+      f.release(); // free the lane now; the hung promise is left behind
+      diag(`stuck ${id} kind=${f.kind}: no progress ${((now - f.run.lastBeat) / 1000).toFixed(0)}s, retrying`);
+      void qdb().items.where("id").equals(id).modify((i) => {
+        i.status = "waiting"; i.error = "stuck"; i.attempts += 1; i.nextAt = now + backoff(i.attempts); i.progress = 0; delete i.lease;
+      }).catch(() => {}).finally(kick);
+    }
     const ids = [...inFlight.keys()];
-    const until = Date.now() + LEASE_MS;
+    if (!ids.length) return;
+    const until = now + LEASE_MS;
     void qdb().items.where("id").anyOf(ids).modify((i) => { if (i.lease?.owner === TAB) i.lease.until = until; }).catch(() => {});
   }, HEARTBEAT_MS);
 }
@@ -445,6 +500,7 @@ async function loop() {
   if (running) { again = true; return; }
   running = true;
   try {
+    holdTabLock();
     await ensureDb();
     const db = qdb();
     // Two lanes: one video at a time per device (heavy) next to up to CONCURRENCY photos,
@@ -455,10 +511,13 @@ async function loop() {
         const now = Date.now();
         const hidden = document.visibilityState === "hidden";
         const active = await db.items.where("status").anyOf(ACTIVE).sortBy("createdAt");
+        const foreign = active.some((i) => i.lease && i.lease.owner !== TAB && i.lease.until >= now);
+        const alive = foreign ? await liveTabs() : null;
+        const liveForeign = (i: QueueItem) => !!i.lease && i.lease.owner !== TAB && i.lease.until > now && (!alive || alive.has(i.lease.owner));
         const ready = active.filter((i) => i.nextAt <= now && !(hidden && i.error === "paused")
-          && !inFlight.has(i.id!) && leaseFree(i, now));
+          && !inFlight.has(i.id!) && leaseFree(i, now, alive));
         // another live tab converting a video? leave the video lane to it
-        const otherVideo = active.some((i) => i.kind === "video" && i.lease && i.lease.owner !== TAB && i.lease.until > now);
+        const otherVideo = active.some((i) => i.kind === "video" && liveForeign(i));
         const busy = [...inFlight.values()];
         const freeVideo = busy.some((x) => x.kind === "video") || otherVideo ? 0 : 1;
         const freePhotos = CONCURRENCY - busy.filter((x) => x.kind === "photo").length;
@@ -467,10 +526,17 @@ async function loop() {
           ...ready.filter((i) => i.kind === "photo").slice(0, Math.max(0, freePhotos)),
         ];
         for (const it of candidates) {
-          if (!(await claim(it.id!))) continue;
+          if (!(await claim(it.id!, alive))) continue;
           const fresh = (await db.items.get(it.id!))!;
-          const p = processOne(fresh).finally(() => { inFlight.delete(it.id!); });
-          inFlight.set(it.id!, { kind: it.kind, p });
+          const run: Run = { lastBeat: Date.now(), abandoned: false };
+          // `gate` settles when the run ends or the watchdog gives up on it, whichever comes first
+          let release!: () => void;
+          const gate = new Promise<void>((r) => { release = r; });
+          processOne(fresh, run).catch(() => {}).finally(() => {
+            if (inFlight.get(it.id!)?.run === run) inFlight.delete(it.id!);
+            release();
+          });
+          inFlight.set(it.id!, { kind: it.kind, p: gate, run, release });
           ensureHeartbeat();
         }
         if (!inFlight.size) break;
@@ -516,6 +582,28 @@ export async function startQueue() {
     const pending = q.pending?.filter((l) => l.name === "gl-queue").length ?? 0;
     if (held || pending) diag(`old gl-queue lock held=${held} pending=${pending}`);
   }).catch(() => {});
+  // A page that died mid-item (browser closed, tab killed) left it "compressing"/"uploading" with
+  // its lease. Leases of this tab id (a same-tab reload: nothing runs yet here), of tabs that no
+  // longer exist (no tab lock), or past their time are dead:
+  // put those items straight back in line instead of showing a frozen "Uploading…".
+  holdTabLock();
+  try {
+    const now = Date.now();
+    const alive = await liveTabs();
+    const n = await qdb().items.where("status").anyOf(["compressing", "uploading"])
+      .filter((i) => !inFlight.has(i.id!) && leaseFree(i, now, alive))
+      .modify((i) => { i.status = "queued"; i.progress = 0; i.nextAt = 0; delete i.lease; });
+    if (n) diag(`recovered ${n} interrupted item(s)`);
+  } catch {}
+  // Going away: hand our leases back so the next page (a new tab id after the browser is closed)
+  // resumes at once instead of waiting LEASE_MS. Best effort: the write may not land in time.
+  const release = () => {
+    const ids = [...inFlight.keys()];
+    if (!ids.length) return;
+    void qdb().items.where("id").anyOf(ids).modify((i) => { if (i.lease?.owner === TAB) i.lease.until = 0; }).catch(() => {});
+  };
+  addEventListener("pagehide", release);
+  document.addEventListener("freeze", release);
   const wake = async () => {
     // network came back: retry waiting items now instead of after their backoff
     await qdb().items.where("status").equals("waiting").filter((i) => i.error !== "budget" && i.error !== "limit").modify({ nextAt: 0 });

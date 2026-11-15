@@ -38,7 +38,9 @@ export function EventApp({ slug, eventName, uploadOpen, view, facesEnabled = fal
     const forced = new URLSearchParams(location.search).get("help") === "1";
     setOnboarding(forced || !hasOnboarded());
     // the upload queue keeps running on every view (uploads continue while browsing the album)
-    ensureJoined(slug).then(() => import("@/client/queue")).then((q) => q.startQueue());
+    // (not gated on the join: the queue re-joins by itself if the server answers 401)
+    void ensureJoined(slug);
+    import("@/client/queue").then((q) => q.startQueue()).catch(() => {});
   }, [slug]);
 
   return (
