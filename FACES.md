@@ -46,7 +46,8 @@ drainFaceJobs (lib/faces/jobs.ts), budget ~45 s:
   claim ≤ 8 jobs: UPDATE … lease … WHERE … FOR UPDATE SKIP LOCKED   (parallel drains never collide)
   each job: fetch the 2048 px photo (or a video's poster) from Blob
             sharp decode → YuNet on a 640 px letterbox of the whole photo + 2×2 overlapping tiles
-            (small faces in group shots) → NMS → drop faces < 36 px
+            (small faces in group shots), detector score ≥ 0.8 → NMS → drop faces < 36 px
+            → drop detections without a face's layout (eyes above nose above mouth, sane proportions)
             align on 5 landmarks (112×112 ArcFace template) → SFace → 128-d unit vector
             quality = confidence × size × frontal × sharpness;  96 px WebP crop as a data URL
             save faces; job done (3 attempts, then failed)
@@ -56,7 +57,7 @@ drainFaceJobs (lib/faces/jobs.ts), budget ~45 s:
 **Jobs that get left behind** (a function killed mid-run, a burst of uploads):
 - every drain also takes jobs whose lease ran out;
 - `/api/gallery/version`, which the open album polls, checks for a stalled backlog in the same query and drains it after replying;
-- the admin page has "Process now", and "Rescan photos" to scan everything again after detector changes (a face found again in the same place keeps its row, so names, merges, "not this person" and covers survive);
+- the admin page has "Process now", and "Rescan photos" to scan everything again after detector changes (a face found again in the same place keeps its row, so names, merges, "not this person" and covers survive; faces no longer found are deleted, and people left without faces disappear). After a detector change, Rescan and then Regroup;
 - a daily cron (`/api/cron/faces`, the Hobby limit) sweeps whatever is left.
 
 **When the model is missing:** if the ONNX runtime or the models aren't installed, jobs are handed back untouched and retried 10 minutes later. Nothing is lost.
@@ -66,11 +67,13 @@ drainFaceJobs (lib/faces/jobs.ts), budget ~45 s:
   - If close neighbours (similarity ≥ `assignSim`, default 0.40) belong to people, join the one with the most weight.
   - Otherwise, if this face and at least `minFaces − 1` close unassigned faces are *good quality*, create a person. This is a DBSCAN core point, the approach Immich uses. Default `minFaces` is 1: one good face is enough for a circle, and the People page sorts by photo count, so one-off faces sit at the end (`FACES_MIN_FACES=2` or `3` hides them).
   - Blurry, tiny or side-on faces can join a person but never start one.
+  - Every new person also needs one *anchor*: a good face the detector scored ≥ 0.9 (`FACES_ANCHOR_SCORE`). On sample photos, every real face scored ≥ 0.9. Ceilings, boards and pets score 0.7–0.86, so a stray false detection never becomes a circle, even at `minFaces` 1.
 - **Full regroup, now and then.** Runs whenever the face count has grown by max(200, 25 %), or when the admin presses "Regroup".
   - Build a symmetric kNN graph (no edges between faces of the same photo), then run Chinese Whispers (dlib's face-clustering algorithm).
   - Each face starts labelled with its current person, so person IDs, names and fixes survive.
   - *Locked* faces never move. *Rejected* (face, person) pairs never join.
-  - New groups become people only with ≥ `minFaces` faces, mostly good ones.
+  - New groups become people only with ≥ `minFaces` faces, mostly good ones, and an anchor.
+  - A person left with a single unlocked face that isn't an anchor (a false detection from older settings) is dissolved.
   - Measured: 10k faces regroup in ~9 s of CPU (brute-force kNN). Spread over a whole wedding that's under a minute.
 - **Single-flight per event:** a lease column on `events`, taken with one conditional UPDATE (no session locks, works on Neon's HTTP driver).
 - **Counts and covers:** recomputed over *visible* media only; the cover is the best-quality face unless the admin pins one. Every change bumps `events.people_version`.

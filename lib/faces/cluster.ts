@@ -5,22 +5,35 @@
  * 1. `decideIncremental`: runs per new face against its nearest neighbours (from pgvector).
  *    Join the person most of the close neighbours belong to; otherwise, if this face and enough
  *    close unassigned faces are good enough, start a new person (a DBSCAN "core point", the
- *    approach Immich uses); otherwise wait.
+ *    approach Immich uses); otherwise wait. A new person also needs one clear, confident face
+ *    (`isAnchor`), so a stray false detection never becomes a person.
  * 2. `regroup`: occasional full pass. kNN graph + Chinese Whispers (dlib's face clustering),
  *    seeded with current person IDs so people keep their identity, names and manual fixes.
  *    Locked faces (confirmed by a human) never move; rejected (face, person) pairs never join.
  */
 
-export interface ClusterConfig { assignSim: number; minFaces: number; seedQuality: number; neighbours: number }
+export interface ClusterConfig {
+  assignSim: number; minFaces: number; seedQuality: number; neighbours: number;
+  /** every new person needs at least one good face (seedQuality) the detector is this sure of */
+  anchorScore: number;
+}
 
-export interface Neighbour { id: string; sim: number; personId: string | null; quality: number }
+export interface Neighbour { id: string; sim: number; personId: string | null; quality: number; score: number }
+
+/**
+ * A face clear enough to vouch for a new person on its own. Detector false positives (a ceiling
+ * light, a grille) can be sharp and "frontal", so quality alone isn't enough: the detector must
+ * also be sure.
+ */
+export const isAnchor = (f: { score: number; quality: number }, cfg: ClusterConfig) =>
+  f.score >= cfg.anchorScore && f.quality >= cfg.seedQuality;
 
 export type Decision =
   | { kind: "assign"; personId: string }
   | { kind: "create"; faceIds: string[] }
   | { kind: "none" };
 
-export function decideIncremental(face: { id: string; quality: number }, neighbours: Neighbour[], cfg: ClusterConfig): Decision {
+export function decideIncremental(face: { id: string; quality: number; score: number }, neighbours: Neighbour[], cfg: ClusterConfig): Decision {
   const near = neighbours.filter((n) => n.id !== face.id && n.sim >= cfg.assignSim);
   const votes = new Map<string, number>();
   for (const n of near) if (n.personId) votes.set(n.personId, (votes.get(n.personId) ?? 0) + n.sim);
@@ -31,13 +44,13 @@ export function decideIncremental(face: { id: string; quality: number }, neighbo
   }
   const unassigned = near.filter((n) => !n.personId);
   const seeds = unassigned.filter((n) => n.quality >= cfg.seedQuality);
-  if (face.quality >= cfg.seedQuality && seeds.length + 1 >= cfg.minFaces) {
+  if (face.quality >= cfg.seedQuality && seeds.length + 1 >= cfg.minFaces && (isAnchor(face, cfg) || seeds.some((n) => isAnchor(n, cfg)))) {
     return { kind: "create", faceIds: [face.id, ...unassigned.map((n) => n.id)] };
   }
   return { kind: "none" };
 }
 
-export interface RFace { id: string; vec: Float32Array; quality: number; personId: string | null; locked: boolean; mediaId?: string }
+export interface RFace { id: string; vec: Float32Array; quality: number; score: number; personId: string | null; locked: boolean; mediaId?: string }
 export type Adjacency = { j: number; w: number }[][];
 
 /**
@@ -153,10 +166,18 @@ export function regroup(faces: RFace[], rejections: Map<string, Set<string>>, cf
   const out = new Map<string, string | null>();
   let k = 0;
   for (const [l, members] of groups) {
-    if (!l.startsWith("f:")) { for (const i of members) out.set(faces[i].id, l); continue; } // an existing person keeps its id
+    const anchored = members.some((i) => isAnchor(faces[i], cfg));
+    if (!l.startsWith("f:")) {
+      // an existing person keeps its id, unless all that's left is one unconfirmed, unconvincing
+      // face (typically a false detection that started a person under looser rules)
+      const drop = members.length === 1 && !faces[members[0]].locked && !anchored;
+      for (const i of members) out.set(faces[i].id, drop ? null : l);
+      continue;
+    }
     const seeds = members.filter((i) => faces[i].quality >= cfg.seedQuality).length;
-    // like the incremental rule: enough faces, and mostly good ones (blurry crowds don't become people)
-    const target = members.length >= cfg.minFaces && seeds >= Math.max(1, cfg.minFaces - 1) ? `${NEW_PREFIX}${k++}` : null;
+    // like the incremental rule: enough faces, mostly good ones (blurry crowds don't become people),
+    // and at least one clear, confident face
+    const target = members.length >= cfg.minFaces && seeds >= Math.max(1, cfg.minFaces - 1) && anchored ? `${NEW_PREFIX}${k++}` : null;
     for (const i of members) out.set(faces[i].id, target);
   }
   return out;

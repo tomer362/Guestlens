@@ -138,3 +138,55 @@ export function offsetDetection(d: Detection, dx: number, dy: number): Detection
     landmarks: d.landmarks.map(([x, y]) => [x + dx, y + dy] as [number, number]),
   };
 }
+
+/**
+ * Landmark layout in the face's own frame: origin at the eyes' midpoint, x along the eye line
+ * (image left eye → image right eye), y perpendicular to it pointing down the face, both in units
+ * of eye distance. Lets the shape test below ignore head roll.
+ */
+export function faceGeometry(d: Detection) {
+  const [re, le, nose, rm, lm] = d.landmarks;
+  const ex = le[0] - re[0], ey = le[1] - re[1];
+  const eye = Math.hypot(ex, ey);
+  const mx = (re[0] + le[0]) / 2, my = (re[1] + le[1]) / 2;
+  const ux = eye > 1e-6 ? ex / eye : 1, uy = eye > 1e-6 ? ey / eye : 0;
+  const local = ([x, y]: [number, number]) => {
+    const dx = x - mx, dy = y - my;
+    return [(dx * ux + dy * uy) / (eye || 1), (-dx * uy + dy * ux) / (eye || 1)] as const;
+  };
+  const [w, h] = [d.box[2], d.box[3]];
+  const pad = 0.15;
+  const inBox = d.landmarks.every(([x, y]) =>
+    x >= d.box[0] - pad * w && x <= d.box[0] + w * (1 + pad) && y >= d.box[1] - pad * h && y <= d.box[1] + h * (1 + pad));
+  return {
+    /** degrees, 0 = upright */
+    roll: (Math.atan2(uy, ux) * 180) / Math.PI,
+    /** eye distance / box width */
+    eyeSpan: eye / Math.max(1e-6, w),
+    aspect: w / Math.max(1e-6, h),
+    nose: local(nose),
+    rightMouth: local(rm),
+    leftMouth: local(lm),
+    inBox,
+  };
+}
+
+/**
+ * Cheap sanity check that a detection has a face's layout: eyes on top, nose below them, mouth
+ * below the nose, sensible proportions. Textures (ceilings, grilles, foliage) that fool the
+ * detector usually come with a jumbled or squashed landmark set and fail here; real faces,
+ * including tilted and side-on ones, pass.
+ */
+export function plausibleFace(d: Detection): boolean {
+  const g = faceGeometry(d);
+  if (!g.inBox) return false;
+  if (Math.abs(g.roll) > 60) return false;
+  if (g.eyeSpan < 0.2 || g.eyeSpan > 0.75) return false;
+  if (g.aspect < 0.5 || g.aspect > 2) return false;
+  const mouthY = (g.rightMouth[1] + g.leftMouth[1]) / 2;
+  if (g.nose[1] < 0.15 || mouthY < g.nose[1] + 0.1) return false; // nose below the eyes, mouth below the nose
+  if (mouthY > 2.2) return false; // mouth far below the eyes: stretched, not a face
+  if (g.leftMouth[0] - g.rightMouth[0] < 0.2) return false; // mouth corners in order, not collapsed
+  if (Math.abs(g.nose[0]) > 1.1) return false; // nose well outside the eyes
+  return true;
+}

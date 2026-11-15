@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { chineseWhispers, decideIncremental, knnGraph, regroup, NEW_PREFIX, type ClusterConfig, type RFace, matchRescan } from "@/lib/faces/cluster";
 import { fromPgVector, l2normalize, toPgVector } from "@/lib/faces/vec";
 
-const cfg: ClusterConfig = { assignSim: 0.4, minFaces: 3, seedQuality: 0.45, neighbours: 10 };
+const cfg: ClusterConfig = { assignSim: 0.4, minFaces: 3, seedQuality: 0.45, neighbours: 10, anchorScore: 0.9 };
 
 /** Deterministic gaussian-ish noise. */
 function rng(seed: number) {
@@ -20,28 +20,47 @@ function synth(people: number, per: number, noise = 0.06, seed = 7) {
 }
 
 describe("decideIncremental", () => {
-  const f = { id: "x", quality: 0.8 };
+  const f = { id: "x", quality: 0.8, score: 0.95 };
   it("joins the person most close neighbours belong to", () => {
     const d = decideIncremental(f, [
-      { id: "a", sim: 0.7, personId: "P", quality: 0.9 }, { id: "b", sim: 0.6, personId: "P", quality: 0.9 },
-      { id: "c", sim: 0.65, personId: "Q", quality: 0.9 }, { id: "d", sim: 0.2, personId: "Q", quality: 0.9 },
+      { id: "a", sim: 0.7, personId: "P", quality: 0.9, score: 0.95 }, { id: "b", sim: 0.6, personId: "P", quality: 0.9, score: 0.95 },
+      { id: "c", sim: 0.65, personId: "Q", quality: 0.9, score: 0.95 }, { id: "d", sim: 0.2, personId: "Q", quality: 0.9, score: 0.95 },
     ], cfg);
     expect(d).toEqual({ kind: "assign", personId: "P" });
   });
   it("ignores neighbours below the similarity threshold", () => {
-    expect(decideIncremental(f, [{ id: "a", sim: 0.3, personId: "P", quality: 0.9 }], cfg)).toEqual({ kind: "none" });
+    expect(decideIncremental(f, [{ id: "a", sim: 0.3, personId: "P", quality: 0.9, score: 0.95 }], cfg)).toEqual({ kind: "none" });
   });
   it("starts a person once enough good unassigned faces agree", () => {
     const d = decideIncremental(f, [
-      { id: "a", sim: 0.7, personId: null, quality: 0.9 }, { id: "b", sim: 0.6, personId: null, quality: 0.5 },
-      { id: "c", sim: 0.6, personId: null, quality: 0.1 },
+      { id: "a", sim: 0.7, personId: null, quality: 0.9, score: 0.95 }, { id: "b", sim: 0.6, personId: null, quality: 0.5, score: 0.95 },
+      { id: "c", sim: 0.6, personId: null, quality: 0.1, score: 0.95 },
     ], cfg);
     expect(d).toEqual({ kind: "create", faceIds: ["x", "a", "b", "c"] });
   });
   it("blurry faces never start a person", () => {
-    const n = [{ id: "a", sim: 0.7, personId: null, quality: 0.1 }, { id: "b", sim: 0.7, personId: null, quality: 0.1 }];
+    const n = [{ id: "a", sim: 0.7, personId: null, quality: 0.1, score: 0.95 }, { id: "b", sim: 0.7, personId: null, quality: 0.1, score: 0.95 }];
     expect(decideIncremental(f, n, cfg)).toEqual({ kind: "none" });
-    expect(decideIncremental({ id: "x", quality: 0.1 }, [...n, { id: "c", sim: 0.7, personId: null, quality: 0.9 }], cfg)).toEqual({ kind: "none" });
+    expect(decideIncremental({ id: "x", quality: 0.1, score: 0.95 }, [...n, { id: "c", sim: 0.7, personId: null, quality: 0.9, score: 0.95 }], cfg)).toEqual({ kind: "none" });
+  });
+});
+
+describe("people seen once (minFaces 1)", () => {
+  const one: ClusterConfig = { ...cfg, minFaces: 1 };
+  it("a clear, confident face starts a person on its own", () => {
+    expect(decideIncremental({ id: "x", quality: 0.7, score: 0.95 }, [], one)).toEqual({ kind: "create", faceIds: ["x"] });
+  });
+  it("a borderline detection does not (a ceiling light, a grille)", () => {
+    expect(decideIncremental({ id: "x", quality: 0.7, score: 0.82 }, [], one)).toEqual({ kind: "none" });
+    expect(decideIncremental({ id: "x", quality: 0.3, score: 0.97 }, [], one)).toEqual({ kind: "none" }); // blurry
+  });
+  it("a borderline face can still start a person with a confident lookalike", () => {
+    const d = decideIncremental({ id: "x", quality: 0.5, score: 0.82 }, [{ id: "a", sim: 0.6, personId: null, quality: 0.8, score: 0.95 }], one);
+    expect(d).toEqual({ kind: "create", faceIds: ["x", "a"] });
+  });
+  it("two borderline lookalikes don't", () => {
+    const d = decideIncremental({ id: "x", quality: 0.7, score: 0.84 }, [{ id: "a", sim: 0.6, personId: null, quality: 0.7, score: 0.83 }], one);
+    expect(d).toEqual({ kind: "none" });
   });
 });
 
@@ -78,7 +97,7 @@ describe("knnGraph + chineseWhispers", () => {
 
 describe("regroup", () => {
   const make = (people: number, per: number) => synth(people, per).map((f, i): RFace & { who: number } => ({
-    id: `face${i}`, vec: f.vec, quality: 0.8, personId: null, locked: false, who: f.who,
+    id: `face${i}`, vec: f.vec, quality: 0.8, score: 0.95, personId: null, locked: false, who: f.who,
   }));
 
   it("creates one new person per identity", () => {
@@ -111,6 +130,27 @@ describe("regroup", () => {
     const out = regroup(faces, new Map([["face3", new Set(["A"])]]), cfg);
     expect(out.get("face0")).toBe("A");
     expect(out.get("face3")).not.toBe("A");
+  });
+
+  it("a single face becomes a person only if it is an anchor (minFaces 1)", () => {
+    const one: ClusterConfig = { ...cfg, minFaces: 1 };
+    const [a, b] = make(2, 1);
+    b.score = 0.82;
+    const out = regroup([a, b], new Map(), one);
+    expect(out.get(a.id)?.startsWith(NEW_PREFIX)).toBe(true);
+    expect(out.get(b.id)).toBeNull();
+  });
+
+  it("drops an existing person left with one unconvincing face, unless a human confirmed it", () => {
+    const one: ClusterConfig = { ...cfg, minFaces: 1 };
+    const [a, b, c] = make(3, 1);
+    a.personId = "ceiling"; a.score = 0.78; a.quality = 0.7;
+    b.personId = "named"; b.score = 0.78; b.quality = 0.7; b.locked = true;
+    c.personId = "clear"; // score 0.95, quality 0.8
+    const out = regroup([a, b, c], new Map(), one);
+    expect(out.get(a.id)).toBeNull();
+    expect(out.get(b.id)).toBe("named");
+    expect(out.get(c.id)).toBe("clear");
   });
 
   it("too few faces don't become a person", () => {

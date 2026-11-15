@@ -21,7 +21,10 @@ export function uuidArray(ids: string[]): string {
 }
 const rows = <T>(r: { rows: unknown[] }) => r.rows as T[];
 
-const cfg = { assignSim: FACES.assignSim, minFaces: FACES.minFaces, seedQuality: FACES.seedQuality, neighbours: FACES.neighbours };
+const cfg = {
+  assignSim: FACES.assignSim, minFaces: FACES.minFaces, seedQuality: FACES.seedQuality, neighbours: FACES.neighbours,
+  anchorScore: FACES.anchorScore,
+};
 
 export async function bumpPeopleVersion(eventId: string) {
   await db().execute(sql`update events set people_version = people_version + 1 where id = ${eventId}`);
@@ -30,9 +33,10 @@ export async function bumpPeopleVersion(eventId: string) {
 /**
  * Replace a media item's faces (re-processing is idempotent). On a re-scan, a face found again in
  * the same place updates the old row, so its person, lock, rejections and cover survive; faces no
- * longer found are deleted, new ones inserted (and clustered as usual).
+ * longer found are deleted, new ones inserted (and clustered as usual). Returns how many old
+ * faces were deleted (their people need a recount).
  */
-export async function saveFaces(eventId: string, mediaId: string, found: FoundFace[]) {
+export async function saveFaces(eventId: string, mediaId: string, found: FoundFace[]): Promise<number> {
   const old = rows<{ id: string; box: number[] }>(await db().execute(sql`select id, box from faces where media_id = ${mediaId}`));
   const match = matchRescan(old.map((o) => o.box.map(Number) as FoundFace["box"]), found.map((f) => f.box));
   const kept = new Set<string>();
@@ -53,6 +57,7 @@ export async function saveFaces(eventId: string, mediaId: string, found: FoundFa
   }
   const gone = old.filter((o) => !kept.has(o.id)).map((o) => o.id);
   if (gone.length) await db().execute(sql`delete from faces where id = any(${uuidArray(gone)}::uuid[])`);
+  return gone.length;
 }
 
 // ---------- clustering ----------
@@ -68,27 +73,28 @@ const release = (eventId: string) => db().execute(sql`update events set faces_lo
 
 /**
  * Assign new faces, regroup when due, refresh people. Returns false if another instance holds
- * the event (it will pick up whatever is left).
+ * the event (it will pick up whatever is left). `refresh`: faces were deleted (a rescan), so
+ * recount people even if nothing new was assigned; people left without faces disappear.
  */
-export async function clusterEvent(eventId: string, opts: { forceRebuild?: boolean; budgetMs?: number } = {}): Promise<boolean> {
+export async function clusterEvent(eventId: string, opts: { forceRebuild?: boolean; budgetMs?: number; refresh?: boolean } = {}): Promise<boolean> {
   const lease = await acquire(eventId);
   if (!lease) return false;
   const t0 = Date.now();
   const budget = opts.budgetMs ?? 40_000;
-  let changed = false;
+  let changed = !!opts.refresh;
   try {
     for (;;) {
-      const batch = rows<{ id: string; media_id: string; embedding: string; quality: number }>(await db().execute(sql`
-        select id, media_id, embedding::text as embedding, quality from faces
+      const batch = rows<{ id: string; media_id: string; embedding: string; quality: number; score: number }>(await db().execute(sql`
+        select id, media_id, embedding::text as embedding, quality, score from faces
         where event_id = ${eventId} and not clustered order by created_at limit 100`));
       if (!batch.length) break;
       for (const f of batch) {
-        const n = rows<{ id: string; person_id: string | null; quality: number; sim: number }>(await db().execute(sql`
-          select id, person_id, quality, 1 - (embedding <=> ${f.embedding}::vector) as sim
+        const n = rows<{ id: string; person_id: string | null; quality: number; score: number; sim: number }>(await db().execute(sql`
+          select id, person_id, quality, score, 1 - (embedding <=> ${f.embedding}::vector) as sim
           from faces where event_id = ${eventId} and media_id <> ${f.media_id} and model = ${MODEL_ID}
           order by embedding <=> ${f.embedding}::vector limit ${FACES.neighbours}`));
-        const neighbours: Neighbour[] = n.map((x) => ({ id: x.id, personId: x.person_id, quality: Number(x.quality), sim: Number(x.sim) }));
-        const d = decideIncremental({ id: f.id, quality: Number(f.quality) }, neighbours, cfg);
+        const neighbours: Neighbour[] = n.map((x) => ({ id: x.id, personId: x.person_id, quality: Number(x.quality), score: Number(x.score), sim: Number(x.sim) }));
+        const d = decideIncremental({ id: f.id, quality: Number(f.quality), score: Number(f.score) }, neighbours, cfg);
         if (d.kind === "assign") {
           await db().execute(sql`update faces set person_id = ${d.personId}, clustered = true where id = ${f.id}`);
           changed = true;
@@ -124,11 +130,11 @@ export async function clusterEvent(eventId: string, opts: { forceRebuild?: boole
 
 /** Full regroup (cluster.ts `regroup`), then write back only what changed. */
 export async function regroupEvent(eventId: string) {
-  const all = rows<{ id: string; media_id: string; embedding: string; quality: number; person_id: string | null; locked: boolean }>(await db().execute(sql`
-    select id, media_id, embedding::text as embedding, quality, person_id, locked from faces
+  const all = rows<{ id: string; media_id: string; embedding: string; quality: number; score: number; person_id: string | null; locked: boolean }>(await db().execute(sql`
+    select id, media_id, embedding::text as embedding, quality, score, person_id, locked from faces
     where event_id = ${eventId} and model = ${MODEL_ID}`));
   if (!all.length) return;
-  const faces: RFace[] = all.map((f) => ({ id: f.id, mediaId: f.media_id, vec: fromPgVector(f.embedding), quality: Number(f.quality), personId: f.person_id, locked: f.locked }));
+  const faces: RFace[] = all.map((f) => ({ id: f.id, mediaId: f.media_id, vec: fromPgVector(f.embedding), quality: Number(f.quality), score: Number(f.score), personId: f.person_id, locked: f.locked }));
   const rej = new Map<string, Set<string>>();
   for (const r of rows<{ face_id: string; person_id: string }>(await db().execute(sql`
     select r.face_id, r.person_id from face_rejections r join faces f on f.id = r.face_id where f.event_id = ${eventId}`))) {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { applySimilarity, ARCFACE_112, estimateSimilarity, invertSimilarity, toSFaceInput, warpRGB } from "@/lib/faces/align";
-import { clipToImage, decodeYunet, iou, letterbox, namedOutputs, nms, offsetDetection, tileRects, toYunetInput, type Detection } from "@/lib/faces/yunet";
+import { clipToImage, decodeYunet, iou, letterbox, namedOutputs, nms, offsetDetection, plausibleFace, tileRects, toYunetInput, type Detection } from "@/lib/faces/yunet";
 import { faceQuality, frontalness, sharpness } from "@/lib/faces/quality";
 
 describe("similarity transform", () => {
@@ -129,5 +129,36 @@ describe("detector tiles", () => {
     expect(o.box).toEqual([110, 220, 30, 40]);
     expect(o.landmarks[4]).toEqual([109, 210]);
     expect(d.box[0]).toBe(10); // input untouched
+  });
+});
+
+describe("plausibleFace", () => {
+  const box: Detection["box"] = [100, 100, 100, 120];
+  const frontal: [number, number][] = [[130, 145], [170, 145], [150, 170], [135, 195], [165, 195]];
+  const det = (landmarks: [number, number][], b = box): Detection => ({ box: b, score: 0.9, landmarks });
+  const rotate = (lm: [number, number][], deg: number): [number, number][] => {
+    const a = (deg * Math.PI) / 180, cx = 150, cy = 160;
+    return lm.map(([x, y]) => [cx + (x - cx) * Math.cos(a) - (y - cy) * Math.sin(a), cy + (x - cx) * Math.sin(a) + (y - cy) * Math.cos(a)]);
+  };
+
+  it("accepts real face layouts: frontal, tilted, side-on", () => {
+    expect(plausibleFace(det(frontal))).toBe(true);
+    expect(plausibleFace(det(rotate(frontal, 30)))).toBe(true);
+    expect(plausibleFace(det(rotate(frontal, -30)))).toBe(true);
+    // turned ~45°: eyes closer together, nose and mouth shifted to one side
+    expect(plausibleFace(det([[140, 145], [170, 145], [178, 170], [150, 195], [172, 195]]))).toBe(true);
+    // measured on a real photo (YuNet output, image coordinates)
+    expect(plausibleFace(det([[134, 150], [176, 150], [164, 178], [118, 201], [154, 202]], [100, 110, 105, 140]))).toBe(true);
+  });
+
+  it("rejects jumbled layouts that textures produce", () => {
+    expect(plausibleFace(det(rotate(frontal, 180)))).toBe(false); // upside down
+    expect(plausibleFace(det(rotate(frontal, 90)))).toBe(false); // lying sideways
+    expect(plausibleFace(det([[130, 145], [170, 145], [150, 125], [135, 195], [165, 195]]))).toBe(false); // nose above the eyes
+    expect(plausibleFace(det([[130, 145], [170, 145], [150, 170], [150, 172], [152, 172]]))).toBe(false); // mouth collapsed onto the nose
+    expect(plausibleFace(det([[130, 145], [170, 145], [150, 170], [135, 260], [165, 260]]))).toBe(false); // mouth far outside the box
+    expect(plausibleFace(det([[100, 145], [200, 145], [150, 170], [135, 195], [165, 195]]))).toBe(false); // eyes at the box edges
+    expect(plausibleFace(det([[135, 145], [145, 145], [150, 170], [135, 195], [165, 195]]))).toBe(false); // eyes squeezed together
+    expect(plausibleFace(det(frontal, [100, 100, 300, 100]))).toBe(false); // 3:1 box
   });
 });

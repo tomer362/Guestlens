@@ -8,7 +8,7 @@ import { alignFace, toSFaceInput } from "./align";
 import { runDetector, runEmbedder } from "./model";
 import { faceQuality, sharpness } from "./quality";
 import { l2normalize } from "./vec";
-import { clipToImage, decodeYunet, letterbox, namedOutputs, nms, offsetDetection, tileRects, toYunetInput, type Detection, type Rect } from "./yunet";
+import { clipToImage, decodeYunet, letterbox, namedOutputs, nms, offsetDetection, plausibleFace, tileRects, toYunetInput, type Detection, type Rect } from "./yunet";
 
 export interface FoundFace {
   box: [number, number, number, number];
@@ -31,7 +31,7 @@ export async function analyzeImage(bytes: Buffer): Promise<FoundFace[]> {
 
   const dets = nms(await detectAll(rgb, W, H))
     .map((d) => clipToImage(d, W, H))
-    .filter((d): d is Detection => !!d && Math.min(d.box[2], d.box[3]) >= FACES.minFacePx)
+    .filter((d): d is Detection => !!d && Math.min(d.box[2], d.box[3]) >= FACES.minFacePx && plausibleFace(d))
     .sort((a, b) => b.box[2] * b.box[3] - a.box[2] * a.box[3])
     .slice(0, MAX_FACES_PER_IMAGE);
 
