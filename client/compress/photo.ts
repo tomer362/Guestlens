@@ -1,11 +1,11 @@
 import { encodeLqipPixels } from "@/lib/lqip";
-const MAX_EDGE = 2048;
+const MAX_EDGE = 2560;
 /** Grid tiles are ~117 CSS px squares → ~350 device px at DPR 3. */
 const THUMB_EDGE = 360;
 const THUMB_QUALITY = 0.6;
 /** Long edge of the inline color-grid placeholder. */
 const LQIP_EDGE = 4;
-const QUALITY = 0.75;
+const QUALITY = 0.85;
 
 export interface Encoded { blob: Blob; type: "image/webp" | "image/jpeg"; width: number; height: number; encoder?: string; }
 
@@ -169,7 +169,7 @@ async function decodePhoto(file: Blob): Promise<Decoded> {
 }
 
 /**
- * 16 MP phone photo (~6.5 MB) → 2048 px WebP q75 (~600 KB) + 360 px square thumb.
+ * 16 MP phone photo (~6.5 MB) → 2560 px WebP q85 (~1.1–1.6 MB) + 360 px square thumb.
  * Re-encoding drops EXIF/GPS; orientation is applied while decoding.
  */
 /**

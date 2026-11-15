@@ -3,7 +3,7 @@
  * heavy decode/scale/encode loop never competes with the UI thread, and falls back to the
  * main thread where module workers are unavailable. No DOM APIs here.
  */
-import { LIMITS } from "@/lib/config";
+import { LIMITS, videoBitrateFor } from "@/lib/config";
 
 export class VideoError extends Error {
   constructor(public code: "tooBig" | "tooLong" | "unsupported") { super(code); }
@@ -25,7 +25,7 @@ export interface CoreHooks {
 const KEEP_BITRATE = 5_000_000;
 /** Short H.264 ≤1080p clips are kept untouched up to this size, whatever their bitrate. */
 const KEEP_SMALL_BYTES = 25 * 1024 * 1024;
-const TARGET_BITRATE = 2_500_000;
+const TARGET_BITRATE = 4_000_000;
 /** Bail out of a conversion that is projected to take longer than this (and upload the original if it fits). */
 const SLOW_LIMIT_S = (durationS: number) => Math.max(45, durationS * 1.5);
 
@@ -107,7 +107,7 @@ export async function prepareVideo(file: Blob, hooks: CoreHooks = {}): Promise<V
       audio: (t) => (t === keepAudio ? {} : { discard: true }),
       // no video options → packets are copied (lossless, fast)
       video: transcode ? {
-        codec: "avc", bitrate: TARGET_BITRATE, keyFrameInterval: 2,
+        codec: "avc", bitrate: videoBitrateFor(duration, TARGET_BITRATE), keyFrameInterval: 2,
         // let the browser pick the hardware encoder when it has one; forcing it also forces
         // the hardware *decoder* and fails outright on some devices
         hardwareAcceleration: "no-preference",
