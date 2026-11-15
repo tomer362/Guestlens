@@ -36,6 +36,19 @@ export async function backfill(eventId: string, guestId?: string): Promise<numbe
   return r.rows.length;
 }
 
+/**
+ * Scan every photo again (after detector improvements). Names, merges, hidden people and manual
+ * fixes are kept: saveFaces updates faces found again in the same place instead of replacing them.
+ */
+export async function rescanEvent(eventId: string): Promise<number> {
+  await db().execute(sql`
+    update face_jobs set status = 'pending', attempts = 0, lease_until = 'epoch', error = null
+    where event_id = ${eventId}`);
+  await backfill(eventId);
+  const r = await db().execute(sql`select count(*)::int as n from face_jobs where event_id = ${eventId} and status = 'pending'`);
+  return Number(rows<{ n: number }>(r)[0]?.n ?? 0);
+}
+
 /** Cheap check for the version poll: is there work nobody is doing right now? */
 export async function hasBacklog(eventId: string): Promise<boolean> {
   const r = await db().execute(sql`

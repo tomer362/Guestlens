@@ -56,7 +56,7 @@ drainFaceJobs (lib/faces/jobs.ts), budget ~45 s:
 **Jobs that get left behind** (a function killed mid-run, a burst of uploads):
 - every drain also takes jobs whose lease ran out;
 - `/api/gallery/version`, which the open album polls, checks for a stalled backlog in the same query and drains it after replying;
-- the admin page has "Process now";
+- the admin page has "Process now", and "Rescan photos" to scan everything again after detector changes (a face found again in the same place keeps its row, so names, merges, "not this person" and covers survive);
 - a daily cron (`/api/cron/faces`, the Hobby limit) sweeps whatever is left.
 
 **When the model is missing:** if the ONNX runtime or the models aren't installed, jobs are handed back untouched and retried 10 minutes later. Nothing is lost.

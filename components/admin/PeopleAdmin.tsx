@@ -5,7 +5,7 @@
  * regroups keep it.
  */
 import { useCallback, useEffect, useState } from "react";
-import { Combine, Eye, EyeOff, Loader2, RefreshCw, Star, Trash2, X } from "lucide-react";
+import { Combine, Eye, EyeOff, Loader2, RefreshCw, ScanFace, Star, Trash2, X } from "lucide-react";
 import { Avatar } from "@/components/people/People";
 
 type P = { id: string; name: string | null; hidden: boolean; faces: number; n: number; cover: string | null };
@@ -67,6 +67,10 @@ export function PeopleAdmin({ enabled, onToggle }: { enabled: boolean; onToggle:
             </button>
             <button disabled={!!busy} onClick={() => act("regroup", () => post("/api/admin/faces", { action: "regroup" }))} className="inline-flex items-center gap-1 rounded-full bg-white px-3 py-1.5 ring-1 ring-black/10">
               {busy === "regroup" ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <Combine className="size-4" aria-hidden />}Regroup
+            </button>
+            <button disabled={!!busy} onClick={() => act("rescan", () => post("/api/admin/faces", { action: "rescan" }))} className="inline-flex items-center gap-1 rounded-full bg-white px-3 py-1.5 ring-1 ring-black/10"
+              title="Scan every photo again with the latest face detection. Names and fixes are kept.">
+              {busy === "rescan" ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <ScanFace className="size-4" aria-hidden />}Rescan photos
             </button>
             <button disabled={!!busy} onClick={() => confirm("Delete every face and person for this event? Turn People OFF first if you don't want photos scanned again.") && act("purge", () => post("/api/admin/faces", { action: "purge" }))}
               className="inline-flex items-center gap-1 rounded-full bg-white px-3 py-1.5 text-red-700 ring-1 ring-black/10">

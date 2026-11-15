@@ -25,7 +25,7 @@ const enabled = !!ADMIN_URL && !!IMAGES && existsSync(MODELS);
 process.env.FACES_MIN_FACES = "3";
 
 const dbName = `gl_faces_e2e_${process.pid}`;
-const state: { pool?: import("pg").Pool } = {};
+const state: { pool?: import("pg").Pool; eventId?: string; after: Promise<unknown>[] } = { after: [] };
 
 vi.mock("@/lib/db/client", async () => {
   const { drizzle } = await import("drizzle-orm/node-postgres");
@@ -33,6 +33,8 @@ vi.mock("@/lib/db/client", async () => {
   let d: ReturnType<typeof drizzle<typeof schema>> | undefined;
   return { schema, db: () => (d ??= drizzle(state.pool!, { schema })) };
 });
+vi.mock("@/lib/auth", async (orig) => ({ ...(await orig<object>()), getAdmin: async () => ({ eid: state.eventId }) }));
+vi.mock("next/server", async (orig) => ({ ...(await orig<object>()), after: (fn: () => unknown) => { state.after.push(Promise.resolve().then(fn)); } }));
 vi.mock("next/headers", () => ({ cookies: async () => ({ get: () => undefined }), headers: async () => new Headers() }));
 
 describe.skipIf(!enabled)("faces end to end", () => {
@@ -73,6 +75,7 @@ describe.skipIf(!enabled)("faces end to end", () => {
 
     const q = (s: string, p: unknown[] = []) => state.pool!.query(s, p);
     eventId = (await q(`insert into events (slug, name, admin_key_hash, faces_enabled) values ('e2e', 'E2E', 'x', true) returning id`)).rows[0].id;
+    state.eventId = eventId;
     const guest = (await q(`insert into guests (event_id) values ($1) returning id`, [eventId])).rows[0].id;
     for (const f of files) {
       const r = await q(`insert into media (event_id, guest_id, kind, sha256, content_type, bytes, thumb_bytes, url, thumb_url, status, ready_at)
@@ -156,5 +159,38 @@ describe.skipIf(!enabled)("faces end to end", () => {
     const { GET: personMedia } = await import("@/app/api/people/[id]/media/route");
     const pm = await (await personMedia(new Request(`http://x/api/people/${list.people[0].id}/media?slug=e2e`), { params: Promise.resolve({ id: list.people[0].id }) })).json();
     expect(pm.items.length).toBe(list.people[0].n);
+  }, 300_000);
+
+  it("rescan keeps names and fixes; admin delete removes an item and its faces", async () => {
+    const { drainFaceJobs, enqueueFaceJob } = await import("@/lib/faces/jobs");
+    const q = (s: string, p: unknown[] = []) => state.pool!.query(s, p);
+    for (const m of media) await enqueueFaceJob(m.id);
+    await drainFaceJobs({ eventId, budgetMs: 120_000 });
+
+    const person = (await q(`select id from people where event_id = $1 order by media_count desc limit 1`, [eventId])).rows[0]?.id as string;
+    expect(person).toBeTruthy();
+    const { PATCH: renamePerson } = await import("@/app/api/admin/people/[id]/route");
+    const rn = await renamePerson(new Request("http://x", { method: "PATCH", body: JSON.stringify({ name: "Dana" }), headers: { "content-type": "application/json" } }), { params: Promise.resolve({ id: person }) });
+    expect(rn.status).toBe(200);
+    const before = (await q(`select id from faces where person_id = $1 order by id`, [person])).rows.map((r) => r.id);
+    expect(before.length).toBeGreaterThan(0);
+
+    const { POST } = await import("@/app/api/admin/faces/route");
+    const rs = await (await POST(new Request("http://x", { method: "POST", body: JSON.stringify({ action: "rescan" }), headers: { "content-type": "application/json" } }))).json();
+    expect(rs.queued).toBe(media.length);
+    await Promise.all(state.after.splice(0));
+    expect((await q(`select count(*)::int n from face_jobs where status <> 'done'`)).rows[0].n).toBe(0);
+    // same faces (same rows), still in the named person
+    const after = (await q(`select id from faces where person_id = $1 order by id`, [person])).rows.map((r) => r.id);
+    expect(after).toEqual(before);
+    expect((await q(`select name from people where id = $1`, [person])).rows[0].name).toBe("Dana");
+
+    const victim = media[0];
+    const { DELETE } = await import("@/app/api/admin/media/[id]/route");
+    expect((await DELETE(new Request("http://x", { method: "DELETE" }), { params: Promise.resolve({ id: victim.id }) })).status).toBe(200);
+    await Promise.all(state.after.splice(0));
+    expect((await q(`select count(*)::int n from media where id = $1`, [victim.id])).rows[0].n).toBe(0);
+    expect((await q(`select count(*)::int n from faces where media_id = $1`, [victim.id])).rows[0].n).toBe(0);
+    expect((await DELETE(new Request("http://x", { method: "DELETE" }), { params: Promise.resolve({ id: victim.id }) })).status).toBe(404);
   }, 300_000);
 });
