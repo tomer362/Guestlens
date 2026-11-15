@@ -104,3 +104,37 @@ export function clipToImage(d: Detection, w: number, h: number): Detection | nul
   if (x2 - x1 < 2 || y2 - y1 < 2) return null;
   return { ...d, box: [x1, y1, x2 - x1, y2 - y1] };
 }
+
+export interface Rect { x: number; y: number; w: number; h: number }
+
+/**
+ * Overlapping grid×grid crops covering a W×H image. Each tile spans 1/grid of the image plus
+ * `overlap` of the image on each inner side, so a face on a seam is whole in at least one tile.
+ * Returns [] when tiling wouldn't help (grid ≤ 1, or the image already fits the detector at
+ * roughly full resolution).
+ */
+export function tileRects(W: number, H: number, grid: number, detectSize: number, overlap = 0.1): Rect[] {
+  if (grid <= 1 || Math.max(W, H) <= detectSize * 1.5) return [];
+  const span = (len: number, i: number) => {
+    const a = Math.max(0, Math.round((i / grid - overlap) * len));
+    const b = Math.min(len, Math.round(((i + 1) / grid + overlap) * len));
+    return [a, b - a] as const;
+  };
+  const out: Rect[] = [];
+  for (let r = 0; r < grid; r++) {
+    for (let c = 0; c < grid; c++) {
+      const [x, w] = span(W, c), [y, h] = span(H, r);
+      out.push({ x, y, w, h });
+    }
+  }
+  return out;
+}
+
+/** Shift a detection found in a crop back into full-image coordinates. */
+export function offsetDetection(d: Detection, dx: number, dy: number): Detection {
+  return {
+    box: [d.box[0] + dx, d.box[1] + dy, d.box[2], d.box[3]],
+    score: d.score,
+    landmarks: d.landmarks.map(([x, y]) => [x + dx, y + dy] as [number, number]),
+  };
+}

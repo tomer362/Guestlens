@@ -5,7 +5,7 @@ import { db } from "@/lib/db/client";
 import { getAdmin } from "@/lib/auth";
 import { FACES } from "@/lib/config";
 import { err, json, parse } from "@/lib/http";
-import { drainFaceJobs } from "@/lib/faces/jobs";
+import { drainFaceJobs, rescanEvent } from "@/lib/faces/jobs";
 import { modelStatus } from "@/lib/faces/model";
 import { clusterEvent, purgeEvent } from "@/lib/faces/store";
 
@@ -38,12 +38,13 @@ export async function GET() {
   }, { headers: { "Cache-Control": "no-store" } });
 }
 
-const Body = z.object({ action: z.enum(["drain", "regroup", "purge"]) });
+const Body = z.object({ action: z.enum(["drain", "regroup", "rescan", "purge"]) });
 
 /**
  * POST { action }:
  * - drain:   process queued jobs now (in the background) and cluster
  * - regroup: full regroup now (keeps names, merges and hidden people)
+ * - rescan:  scan every photo again (keeps names and fixes), starting now in the background
  * - purge:   delete every face, person and job of this event (turn faces off first to stop new ones)
  */
 export async function POST(req: Request) {
@@ -58,6 +59,11 @@ export async function POST(req: Request) {
   if (b.action === "regroup") {
     const ran = await clusterEvent(a.eid, { forceRebuild: true, budgetMs: 200_000 });
     return ran ? json({ ok: true }) : err(409, "busy");
+  }
+  if (b.action === "rescan") {
+    const queued = await rescanEvent(a.eid);
+    after(() => drainFaceJobs({ eventId: a.eid, budgetMs: 240_000 }).then(() => undefined));
+    return json({ ok: true, queued });
   }
   await purgeEvent(a.eid);
   return json({ ok: true });

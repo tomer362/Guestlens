@@ -8,7 +8,7 @@
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { FACES } from "@/lib/config";
-import { decideIncremental, regroup, NEW_PREFIX, type Neighbour, type RFace } from "./cluster";
+import { decideIncremental, matchRescan, regroup, NEW_PREFIX, type Neighbour, type RFace } from "./cluster";
 import { MODEL_ID } from "./model";
 import type { FoundFace } from "./pipeline";
 import { fromPgVector, toPgVector } from "./vec";
@@ -27,15 +27,32 @@ export async function bumpPeopleVersion(eventId: string) {
   await db().execute(sql`update events set people_version = people_version + 1 where id = ${eventId}`);
 }
 
-/** Replace a media item's faces (re-processing is idempotent). */
+/**
+ * Replace a media item's faces (re-processing is idempotent). On a re-scan, a face found again in
+ * the same place updates the old row, so its person, lock, rejections and cover survive; faces no
+ * longer found are deleted, new ones inserted (and clustered as usual).
+ */
 export async function saveFaces(eventId: string, mediaId: string, found: FoundFace[]) {
-  await db().execute(sql`delete from faces where media_id = ${mediaId}`);
-  for (const f of found) {
-    await db().execute(sql`
-      insert into faces (event_id, media_id, model, embedding, box, score, quality, crop)
-      values (${eventId}, ${mediaId}, ${MODEL_ID}, ${toPgVector(f.embedding)}::vector,
-              ${`{${f.box.map((v) => v.toFixed(1)).join(",")}}`}::real[], ${f.score}, ${f.quality}, ${f.crop})`);
+  const old = rows<{ id: string; box: number[] }>(await db().execute(sql`select id, box from faces where media_id = ${mediaId}`));
+  const match = matchRescan(old.map((o) => o.box.map(Number) as FoundFace["box"]), found.map((f) => f.box));
+  const kept = new Set<string>();
+  for (const [i, f] of found.entries()) {
+    const box = `{${f.box.map((v) => v.toFixed(1)).join(",")}}`;
+    const j = match.get(i);
+    if (j !== undefined) {
+      kept.add(old[j].id);
+      await db().execute(sql`
+        update faces set model = ${MODEL_ID}, embedding = ${toPgVector(f.embedding)}::vector, box = ${box}::real[],
+          score = ${f.score}, quality = ${f.quality}, crop = ${f.crop}
+        where id = ${old[j].id}`);
+    } else {
+      await db().execute(sql`
+        insert into faces (event_id, media_id, model, embedding, box, score, quality, crop)
+        values (${eventId}, ${mediaId}, ${MODEL_ID}, ${toPgVector(f.embedding)}::vector, ${box}::real[], ${f.score}, ${f.quality}, ${f.crop})`);
+    }
   }
+  const gone = old.filter((o) => !kept.has(o.id)).map((o) => o.id);
+  if (gone.length) await db().execute(sql`delete from faces where id = any(${uuidArray(gone)}::uuid[])`);
 }
 
 // ---------- clustering ----------

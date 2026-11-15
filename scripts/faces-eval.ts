@@ -1,7 +1,7 @@
 /**
  * Tune face grouping on real photos, offline (no database, no Blob):
  *
- *   npm run faces:eval -- <folder of .jpg/.webp> [assignSim=0.4] [minFaces=3]
+ *   npm run faces:eval -- <folder of .jpg/.webp> [assignSim=0.4] [minFaces=1]
  *
  * Runs the same pipeline as the server (lib/faces/pipeline.ts) on every image, groups the faces
  * with the same regroup() the server uses, and writes faces-eval.html: one row of face crops per
@@ -34,7 +34,7 @@ async function main() {
   }
   console.log(`${files.length} images, ${all.length} faces, ${((Date.now() - t0) / 1000).toFixed(1)} s`);
 
-  const rfaces: RFace[] = all.map((x) => ({ id: x.id, vec: x.embedding, quality: x.quality, personId: null, locked: false }));
+  const rfaces: RFace[] = all.map((x) => ({ id: x.id, vec: x.embedding, quality: x.quality, personId: null, locked: false, mediaId: x.file }));
   const out = regroup(rfaces, new Map(), { assignSim, minFaces, seedQuality: FACES.seedQuality, neighbours: FACES.neighbours });
   const groups = new Map<string, typeof all>();
   for (const x of all) {

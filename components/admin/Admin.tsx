@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
-import { Download, Eye, EyeOff, Lock, Printer } from "lucide-react";
+import { Download, Eye, EyeOff, Lock, Printer, Trash2 } from "lucide-react";
 import QRCode from "qrcode";
 import { useGallery } from "@/components/gallery/Gallery";
 import { LangToggle } from "@/components/LangToggle";
@@ -115,6 +115,12 @@ function Moderation({ slug }: { slug: string }) {
     await fetch(`/api/admin/media/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hidden }) });
     g.setItems((xs) => xs.map((x) => (x.id === id ? { ...x, hidden } : x)));
   };
+  const remove = async (id: string) => {
+    if (!confirm("Delete this for good? Guests won't see it any more and it can't be restored. (Hide it instead if you might want it back.)")) return;
+    const r = await fetch(`/api/admin/media/${id}`, { method: "DELETE" });
+    if (r.ok) g.setItems((xs) => xs.filter((x) => x.id !== id));
+    else alert("Couldn't delete it, please try again.");
+  };
   return (
     <section>
       <h2 className="mb-2 font-semibold">Moderation</h2>
@@ -124,6 +130,9 @@ function Moderation({ slug }: { slug: string }) {
             <a href={it.url} target="_blank" rel="noreferrer"><img src={it.thumbUrl} alt="" loading="lazy" className="size-full object-cover" /></a>
             <button onClick={() => toggle(it.id, !it.hidden)} className="absolute end-1 top-1 grid size-8 place-items-center rounded-full bg-black/50 text-white" aria-label={it.hidden ? "Unhide" : "Hide"}>
               {it.hidden ? <Eye className="size-4" aria-hidden /> : <EyeOff className="size-4" aria-hidden />}
+            </button>
+            <button onClick={() => remove(it.id)} className="absolute start-1 top-1 grid size-8 place-items-center rounded-full bg-black/50 text-white" aria-label="Delete">
+              <Trash2 className="size-4" aria-hidden />
             </button>
           </div>
         ))}

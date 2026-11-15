@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chineseWhispers, decideIncremental, knnGraph, regroup, NEW_PREFIX, type ClusterConfig, type RFace } from "@/lib/faces/cluster";
+import { chineseWhispers, decideIncremental, knnGraph, regroup, NEW_PREFIX, type ClusterConfig, type RFace, matchRescan } from "@/lib/faces/cluster";
 import { fromPgVector, l2normalize, toPgVector } from "@/lib/faces/vec";
 
 const cfg: ClusterConfig = { assignSim: 0.4, minFaces: 3, seedQuality: 0.45, neighbours: 10 };
@@ -125,5 +125,18 @@ describe("pgvector text", () => {
     const v = l2normalize(Float32Array.from({ length: 128 }, (_, i) => Math.sin(i)));
     const back = fromPgVector(toPgVector(v));
     for (let i = 0; i < 128; i++) expect(back[i]).toBeCloseTo(v[i], 4);
+  });
+});
+
+describe("matchRescan", () => {
+  it("pairs faces found again in the same place, one to one", () => {
+    const old: [number, number, number, number][] = [[100, 100, 50, 50], [400, 100, 50, 50]];
+    const found: [number, number, number, number][] = [[402, 98, 52, 51], [800, 800, 40, 40], [103, 101, 48, 50]];
+    expect([...matchRescan(old, found)].sort()).toEqual([[0, 1], [2, 0]]);
+  });
+  it("never reuses an old face twice", () => {
+    const m = matchRescan([[0, 0, 100, 100]], [[2, 2, 100, 100], [0, 0, 98, 98]]);
+    expect(m.size).toBe(1);
+    expect(m.get(1)).toBe(0); // the closer one wins
   });
 });

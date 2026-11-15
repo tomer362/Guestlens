@@ -77,7 +77,12 @@ export const GALLERY = {
 export const FACES = {
   /** detector input: the image is letterboxed into this square (YuNet 2023mar is fixed at 640) */
   detectSize: 640,
-  minScore: 0.8,
+  /**
+   * Besides the whole image, YuNet also runs on a tiles×tiles grid of overlapping crops, so faces
+   * in group shots (≈20 px after shrinking 2048 → 640) are seen ~2× bigger. 1 = whole image only.
+   */
+  tiles: Number(process.env.FACES_TILES) || 2,
+  minScore: Number(process.env.FACES_MIN_SCORE) || 0.7,
   /** smallest face side in source pixels worth embedding */
   minFacePx: 36,
   /** faces below this quality may join a person but never start one */
@@ -85,8 +90,12 @@ export const FACES = {
   /** neighbours this similar count as "the same person" (SFace's own match threshold is 0.363) */
   assignSim: Number(process.env.FACES_ASSIGN_SIM) || 0.4,
   neighbours: 10,
-  /** a new person needs this many mutually similar faces (DBSCAN core point, Immich-style) */
-  minFaces: Number(process.env.FACES_MIN_FACES) || 3,
+  /**
+   * a new person needs this many mutually similar faces (DBSCAN core point, Immich-style).
+   * 1 = anyone seen once in a good-quality face gets a circle (sorted by photo count, so one-offs
+   * sit at the end); raise to 2–3 to hide background faces.
+   */
+  minFaces: Number(process.env.FACES_MIN_FACES) || 1,
   /** full regroup once the face count grew by max(rebuildMin, rebuildFrac × last count) */
   rebuildMin: 200,
   rebuildFrac: 0.25,

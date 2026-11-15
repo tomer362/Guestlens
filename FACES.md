@@ -45,7 +45,8 @@ Blob onUploadCompleted webhook ┴─► item becomes ready → afterReady() (li
 drainFaceJobs (lib/faces/jobs.ts), budget ~45 s:
   claim ≤ 8 jobs: UPDATE … lease … WHERE … FOR UPDATE SKIP LOCKED   (parallel drains never collide)
   each job: fetch the 2048 px photo (or a video's poster) from Blob
-            sharp decode → YuNet on a 640 px letterbox → NMS → drop faces < 36 px
+            sharp decode → YuNet on a 640 px letterbox of the whole photo + 2×2 overlapping tiles
+            (small faces in group shots) → NMS → drop faces < 36 px
             align on 5 landmarks (112×112 ArcFace template) → SFace → 128-d unit vector
             quality = confidence × size × frontal × sharpness;  96 px WebP crop as a data URL
             save faces; job done (3 attempts, then failed)
@@ -55,7 +56,7 @@ drainFaceJobs (lib/faces/jobs.ts), budget ~45 s:
 **Jobs that get left behind** (a function killed mid-run, a burst of uploads):
 - every drain also takes jobs whose lease ran out;
 - `/api/gallery/version`, which the open album polls, checks for a stalled backlog in the same query and drains it after replying;
-- the admin page has "Process now";
+- the admin page has "Process now", and "Rescan photos" to scan everything again after detector changes (a face found again in the same place keeps its row, so names, merges, "not this person" and covers survive);
 - a daily cron (`/api/cron/faces`, the Hobby limit) sweeps whatever is left.
 
 **When the model is missing:** if the ONNX runtime or the models aren't installed, jobs are handed back untouched and retried 10 minutes later. Nothing is lost.
@@ -63,7 +64,7 @@ drainFaceJobs (lib/faces/jobs.ts), budget ~45 s:
 ### Clustering (`lib/faces/cluster.ts`, `lib/faces/store.ts`)
 - **Incremental, per new face.** Find the 10 nearest faces in the event with pgvector cosine (`<=>`), skipping faces from the same photo.
   - If close neighbours (similarity ≥ `assignSim`, default 0.40) belong to people, join the one with the most weight.
-  - Otherwise, if this face and at least `minFaces − 1` close unassigned faces are *good quality*, create a person. This is a DBSCAN core point, the approach Immich uses.
+  - Otherwise, if this face and at least `minFaces − 1` close unassigned faces are *good quality*, create a person. This is a DBSCAN core point, the approach Immich uses. Default `minFaces` is 1: one good face is enough for a circle, and the People page sorts by photo count, so one-off faces sit at the end (`FACES_MIN_FACES=2` or `3` hides them).
   - Blurry, tiny or side-on faces can join a person but never start one.
 - **Full regroup, now and then.** Runs whenever the face count has grown by max(200, 25 %), or when the admin presses "Regroup".
   - Build a symmetric kNN graph (no edges between faces of the same photo), then run Chinese Whispers (dlib's face-clustering algorithm).

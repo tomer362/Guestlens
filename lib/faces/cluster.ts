@@ -161,3 +161,26 @@ export function regroup(faces: RFace[], rejections: Map<string, Set<string>>, cf
   }
   return out;
 }
+
+type Box = [number, number, number, number];
+const boxIou = (a: Box, b: Box) => {
+  const x1 = Math.max(a[0], b[0]), y1 = Math.max(a[1], b[1]);
+  const x2 = Math.min(a[0] + a[2], b[0] + b[2]), y2 = Math.min(a[1] + a[3], b[1] + b[3]);
+  const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  const u = a[2] * a[3] + b[2] * b[3] - inter;
+  return u > 0 ? inter / u : 0;
+};
+
+/**
+ * Re-scanning a photo: pair each newly found face with the old face in the same place (greedy,
+ * best overlap first, one-to-one), so the old row can be updated in place and keep its person,
+ * lock, rejections and cover. Returns new index → old index.
+ */
+export function matchRescan(oldBoxes: Box[], newBoxes: Box[], minIou = 0.4): Map<number, number> {
+  const pairs: { i: number; j: number; v: number }[] = [];
+  newBoxes.forEach((nb, i) => oldBoxes.forEach((ob, j) => { const v = boxIou(nb, ob); if (v >= minIou) pairs.push({ i, j, v }); }));
+  pairs.sort((a, b) => b.v - a.v);
+  const out = new Map<number, number>(), used = new Set<number>();
+  for (const { i, j } of pairs) if (!out.has(i) && !used.has(j)) { out.set(i, j); used.add(j); }
+  return out;
+}

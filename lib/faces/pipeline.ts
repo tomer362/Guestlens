@@ -8,7 +8,7 @@ import { alignFace, toSFaceInput } from "./align";
 import { runDetector, runEmbedder } from "./model";
 import { faceQuality, sharpness } from "./quality";
 import { l2normalize } from "./vec";
-import { clipToImage, decodeYunet, letterbox, namedOutputs, nms, toYunetInput, type Detection } from "./yunet";
+import { clipToImage, decodeYunet, letterbox, namedOutputs, nms, offsetDetection, tileRects, toYunetInput, type Detection, type Rect } from "./yunet";
 
 export interface FoundFace {
   box: [number, number, number, number];
@@ -29,11 +29,7 @@ export async function analyzeImage(bytes: Buffer): Promise<FoundFace[]> {
   const W = info.width, H = info.height;
   if (info.channels !== 3) throw new Error(`unexpected_channels_${info.channels}`);
 
-  const lb = letterbox(W, H, FACES.detectSize);
-  const small = await sharp(rgb, { raw: { width: W, height: H, channels: 3 } })
-    .resize(lb.w, lb.h, { fit: "fill", kernel: "lanczos3" }).raw().toBuffer();
-  const out = await runDetector(toYunetInput(small, lb), lb.size);
-  const dets = nms(decodeYunet(namedOutputs(out.names, out.data), lb, FACES.minScore))
+  const dets = nms(await detectAll(rgb, W, H))
     .map((d) => clipToImage(d, W, H))
     .filter((d): d is Detection => !!d && Math.min(d.box[2], d.box[3]) >= FACES.minFacePx)
     .sort((a, b) => b.box[2] * b.box[3] - a.box[2] * a.box[3])
@@ -47,6 +43,36 @@ export async function analyzeImage(bytes: Buffer): Promise<FoundFace[]> {
     faces.push({ box: d.box, score: d.score, quality, embedding, crop: await cropDataUrl(rgb, W, H, d.box) });
   }
   return faces;
+}
+
+/**
+ * YuNet on the whole image (big faces) and on overlapping tiles (small faces in group shots),
+ * all in full-image coordinates, before NMS.
+ */
+async function detectAll(rgb: Buffer, W: number, H: number): Promise<Detection[]> {
+  const all = await detectIn(rgb, W, H, { x: 0, y: 0, w: W, h: H });
+  for (const t of tileRects(W, H, FACES.tiles, FACES.detectSize)) {
+    for (const d of await detectIn(rgb, W, H, t)) {
+      // a face cut by an inner tile edge is a partial box; the neighbouring tile (or the whole pass) has it whole
+      const [x, y, w, h] = d.box;
+      const cut = (t.x > 0 && x <= t.x + EDGE) || (t.y > 0 && y <= t.y + EDGE)
+        || (t.x + t.w < W && x + w >= t.x + t.w - EDGE) || (t.y + t.h < H && y + h >= t.y + t.h - EDGE);
+      if (!cut) all.push(d);
+    }
+  }
+  return all;
+}
+
+const EDGE = 2;
+
+async function detectIn(rgb: Buffer, W: number, H: number, r: Rect): Promise<Detection[]> {
+  const lb = letterbox(r.w, r.h, FACES.detectSize);
+  let img = sharp(rgb, { raw: { width: W, height: H, channels: 3 } });
+  if (r.w !== W || r.h !== H) img = img.extract({ left: r.x, top: r.y, width: r.w, height: r.h });
+  const small = await img.resize(lb.w, lb.h, { fit: "fill", kernel: "lanczos3" }).raw().toBuffer();
+  const out = await runDetector(toYunetInput(small, lb), lb.size);
+  const dets = decodeYunet(namedOutputs(out.names, out.data), lb, FACES.minScore);
+  return r.x || r.y ? dets.map((d) => offsetDetection(d, r.x, r.y)) : dets;
 }
 
 /** Square crop around the face with some margin (hair, chin), as a small WebP data URL. */

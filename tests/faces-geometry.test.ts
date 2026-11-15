@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { applySimilarity, ARCFACE_112, estimateSimilarity, invertSimilarity, toSFaceInput, warpRGB } from "@/lib/faces/align";
-import { clipToImage, decodeYunet, iou, letterbox, namedOutputs, nms, toYunetInput, type Detection } from "@/lib/faces/yunet";
+import { clipToImage, decodeYunet, iou, letterbox, namedOutputs, nms, offsetDetection, tileRects, toYunetInput, type Detection } from "@/lib/faces/yunet";
 import { faceQuality, frontalness, sharpness } from "@/lib/faces/quality";
 
 describe("similarity transform", () => {
@@ -96,5 +96,38 @@ describe("quality", () => {
     const q = faceQuality({ score: 0.95, box: [0, 0, 150, 150], landmarks: frontal, sharp: 500 });
     expect(q).toBeGreaterThan(0.9);
     expect(faceQuality({ score: 0.95, box: [0, 0, 20, 20], landmarks: frontal, sharp: 5 })).toBeLessThan(0.45);
+  });
+});
+
+describe("detector tiles", () => {
+  it("skips tiling for small images or grid 1", () => {
+    expect(tileRects(800, 600, 2, 640)).toEqual([]);
+    expect(tileRects(2048, 1536, 1, 640)).toEqual([]);
+  });
+  it("covers the whole image with overlapping tiles", () => {
+    const W = 2048, H = 1536;
+    const t = tileRects(W, H, 2, 640);
+    expect(t).toHaveLength(4);
+    for (const r of t) {
+      expect(r.x).toBeGreaterThanOrEqual(0);
+      expect(r.y).toBeGreaterThanOrEqual(0);
+      expect(r.x + r.w).toBeLessThanOrEqual(W);
+      expect(r.y + r.h).toBeLessThanOrEqual(H);
+    }
+    // every pixel column/row is inside some tile, and neighbours overlap by ~20 % of the image
+    expect(Math.min(...t.map((r) => r.x))).toBe(0);
+    expect(Math.max(...t.map((r) => r.x + r.w))).toBe(W);
+    expect(Math.max(...t.map((r) => r.y + r.h))).toBe(H);
+    const [a, b] = [t[0], t[1]];
+    expect(a.x + a.w - b.x).toBeGreaterThanOrEqual(0.2 * W - 1);
+    // a tile is ~60 % of the image, so the detector sees faces ~1.7× bigger than in the whole pass
+    expect(Math.max(a.w, a.h) / Math.max(W, H)).toBeCloseTo(0.6, 1);
+  });
+  it("maps a detection from a tile back to image coordinates", () => {
+    const d: Detection = { box: [10, 20, 30, 40], score: 0.9, landmarks: [[1, 2], [3, 4], [5, 6], [7, 8], [9, 10]] };
+    const o = offsetDetection(d, 100, 200);
+    expect(o.box).toEqual([110, 220, 30, 40]);
+    expect(o.landmarks[4]).toEqual([109, 210]);
+    expect(d.box[0]).toBe(10); // input untouched
   });
 });
