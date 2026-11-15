@@ -83,15 +83,16 @@ async function fetchImage(url: string, maxBytes: number): Promise<Buffer> {
   return buf;
 }
 
-async function processJob(j: Claimed) {
+/** Faces found; `removed` = old faces no longer found (a rescan), whose people need a recount. */
+async function processJob(j: Claimed): Promise<{ found: number; removed: number }> {
   // photos: the 2048 px upload; videos: the poster frame the phone made from the original
   const src = j.kind === "photo" ? j.url : j.thumb_url;
   if (!src) throw new Error("no_url");
   const { analyzeImage } = await import("./pipeline"); // sharp + ONNX only load in functions that do face work
   const found = await analyzeImage(await fetchImage(src, j.kind === "photo" ? LIMITS.photo.maxBytes : LIMITS.thumb.maxBytes));
-  await saveFaces(j.event_id, j.media_id, found);
+  const removed = await saveFaces(j.event_id, j.media_id, found);
   await db().execute(sql`update face_jobs set status = 'done', faces = ${found.length}, error = null where media_id = ${j.media_id}`);
-  return found.length;
+  return { found: found.length, removed };
 }
 
 export interface DrainResult { jobs: number; faces: number; failed: number; unavailable?: string }
@@ -105,6 +106,7 @@ export async function drainFaceJobs(opts: { eventId?: string; budgetMs?: number 
   const budget = opts.budgetMs ?? FACES.drainBudgetMs;
   const res: DrainResult = { jobs: 0, faces: 0, failed: 0 };
   const events = new Set<string>(opts.eventId ? [opts.eventId] : []);
+  const shrunk = new Set<string>();
   try {
     while (Date.now() - t0 < budget * 0.75) {
       const batch = await claim(FACES.jobsPerDrain, opts.eventId);
@@ -116,7 +118,9 @@ export async function drainFaceJobs(opts: { eventId?: string; budgetMs?: number 
           continue;
         }
         try {
-          res.faces += await processJob(j);
+          const r = await processJob(j);
+          res.faces += r.found;
+          if (r.removed) shrunk.add(j.event_id);
           res.jobs++;
         } catch (e) {
           if (e instanceof ModelUnavailable) {
@@ -139,7 +143,7 @@ export async function drainFaceJobs(opts: { eventId?: string; budgetMs?: number 
         if (Date.now() - t0 > budget * 0.75) break;
       }
     }
-    for (const e of events) await clusterEvent(e, { budgetMs: Math.max(5_000, budget - (Date.now() - t0)) });
+    for (const e of events) await clusterEvent(e, { budgetMs: Math.max(5_000, budget - (Date.now() - t0)), refresh: shrunk.has(e) });
   } catch (e) {
     console.error("[faces] drain error", e);
   }

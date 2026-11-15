@@ -34,8 +34,8 @@ async function main() {
   }
   console.log(`${files.length} images, ${all.length} faces, ${((Date.now() - t0) / 1000).toFixed(1)} s`);
 
-  const rfaces: RFace[] = all.map((x) => ({ id: x.id, vec: x.embedding, quality: x.quality, personId: null, locked: false, mediaId: x.file }));
-  const out = regroup(rfaces, new Map(), { assignSim, minFaces, seedQuality: FACES.seedQuality, neighbours: FACES.neighbours });
+  const rfaces: RFace[] = all.map((x) => ({ id: x.id, vec: x.embedding, quality: x.quality, score: x.score, personId: null, locked: false, mediaId: x.file }));
+  const out = regroup(rfaces, new Map(), { assignSim, minFaces, seedQuality: FACES.seedQuality, neighbours: FACES.neighbours, anchorScore: FACES.anchorScore });
   const groups = new Map<string, typeof all>();
   for (const x of all) {
     const g = out.get(x.id) ?? "unassigned";

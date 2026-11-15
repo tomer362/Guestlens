@@ -82,11 +82,20 @@ export const FACES = {
    * in group shots (≈20 px after shrinking 2048 → 640) are seen ~2× bigger. 1 = whole image only.
    */
   tiles: Number(process.env.FACES_TILES) || 2,
-  minScore: Number(process.env.FACES_MIN_SCORE) || 0.7,
+  /**
+   * detector cut-off. 0.7 let ceilings, grilles and signs through (and with 5 passes per photo
+   * they get 5 chances); real faces below 0.8 are mostly too dark or blurry to group anyway.
+   */
+  minScore: Number(process.env.FACES_MIN_SCORE) || 0.8,
   /** smallest face side in source pixels worth embedding */
   minFacePx: 36,
   /** faces below this quality may join a person but never start one */
   seedQuality: 0.45,
+  /**
+   * every new person needs at least one face the detector is this sure of (and of seedQuality):
+   * stray false detections (ceilings, grilles, pets) score below it, real faces above
+   */
+  anchorScore: Number(process.env.FACES_ANCHOR_SCORE) || 0.9,
   /** neighbours this similar count as "the same person" (SFace's own match threshold is 0.363) */
   assignSim: Number(process.env.FACES_ASSIGN_SIM) || 0.4,
   neighbours: 10,
