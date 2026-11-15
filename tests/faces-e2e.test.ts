@@ -20,6 +20,10 @@ const IMAGES = process.env.FACES_TEST_IMAGES;
 const MODELS = path.join(__dirname, "..", "lib", "faces", "models", "face_recognition_sface_2021dec.onnx");
 const enabled = !!ADMIN_URL && !!IMAGES && existsSync(MODELS);
 
+// this test checks that one-off strangers stay hidden, so it pins the stricter setting
+// (config is only imported dynamically below, after this runs)
+process.env.FACES_MIN_FACES = "3";
+
 const dbName = `gl_faces_e2e_${process.pid}`;
 const state: { pool?: import("pg").Pool } = {};
 
