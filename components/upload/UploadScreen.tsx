@@ -185,7 +185,9 @@ export function UploadScreen({ slug, uploadOpen, onHandle }: { slug: string; upl
               {it.status === "done" || it.status === "duplicate" ? (
                 <Check className="size-5 text-emerald-600" aria-hidden />
               ) : it.status === "failed" || (it.status === "waiting" && it.error !== "budget")
-                || (it.status === "queued" && it.error !== "paused" && now - it.createdAt > 20_000 && (!it.lease || it.lease.until < now)) ? (
+                || (it.status === "queued" && it.error !== "paused" && now - it.createdAt > 20_000 && (!it.lease || it.lease.until < now))
+                // nobody is working on it (its page closed mid-way): let the guest restart it
+                || ((it.status === "uploading" || it.status === "compressing") && (!it.lease || it.lease.until < now)) ? (
                 <button type="button" onClick={() => retry(it.id!)} aria-label={t.common.retry} className="grid size-8 place-items-center rounded-full bg-blush"><RotateCw className="size-4" aria-hidden /></button>
               ) : it.status === "rejected" ? (
                 <button type="button" onClick={() => removeItem(it.id!)} aria-label={t.common.close} className="grid size-8 place-items-center rounded-full bg-blush"><X className="size-4" aria-hidden /></button>
