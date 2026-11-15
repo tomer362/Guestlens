@@ -7,9 +7,12 @@ The **People** page shows one circle per person at the event, using their face. 
 
 ## 1. The constraint that decides the design
 
-A guest shoots, uploads and **puts the phone straight into a pocket**. iOS and Android then freeze the page: the upload queue already pauses video prep when the page is hidden (`client/queue.ts`). So nothing can rely on the uploader's phone after the upload.
+A guest shoots, uploads and **puts the phone straight into a pocket**. iOS and Android then freeze the page, and **uploading stops with it**: the queue (`client/queue.ts`) is page JavaScript, with no service-worker or Background Fetch path.
+- iOS suspends the page within seconds; Safari has no Background Fetch or Background Sync.
+- Chrome on Android freezes a hidden page after about a minute.
+- So an item that wasn't finished when the phone went away stays on the phone until the guest opens the app again. That is usually the next time they shoot.
 
-The server always learns about each upload, even when the phone froze right after sending the bytes. It hears through two paths: `/api/media/complete`, and Vercel Blob's `onUploadCompleted` webhook (`app/api/blob/token/route.ts` → `lib/media.ts markPart`).
+Nothing can rely on the uploader's phone after it goes into a pocket, *including* any face work done there. The server learns about each item when its upload actually finishes, through `/api/media/complete`, or through Vercel Blob's `onUploadCompleted` webhook (`app/api/blob/token/route.ts` → `lib/media.ts markPart`). The webhook covers a phone that froze between the file upload and `/complete`. Face scanning starts from there, so faces trail the upload by seconds, however late the upload itself is.
 
 Grouping needs every guest's faces in one place, so **clustering always runs on the server**. The only real choice is where faces are *detected and embedded* (turned into comparable vectors).
 
@@ -18,7 +21,7 @@ Grouping needs every guest's faces in one place, so **clustering always runs on 
 | | A. Uploader's phone | **B. Our server (chosen)** | C. AWS Rekognition | D. External ML worker | E. Viewers' phones |
 |---|---|---|---|---|---|
 | Where detection and embedding run | Browser, after compressing (ONNX Runtime Web / MediaPipe) | Vercel function, after the response: `sharp` + ONNX | `IndexFaces` into a per-event collection | Python box (Modal / Fly / home PC) pulling jobs from Neon | Whoever has the album open processes unscanned items |
-| Survives "upload then pocket" | ❌ only while the screen stays on; adds CPU and a ~5–40 MB model download on wedding Wi-Fi | ✅ started by `/complete` **or** the Blob webhook | ✅ | ✅ | ⚠️ only while someone is browsing |
+| Survives "upload then pocket" | ❌ only while the screen stays on, and it competes with the upload for those few seconds; adds a ~5–40 MB model download on wedding Wi-Fi | ✅ starts whenever the upload finishes (`/complete` **or** the Blob webhook), with nothing more needed from the phone | ✅ | ✅ | ⚠️ only while someone is browsing |
 | Device coverage | uneven (old Android, in-app webviews, iOS WASM memory, flaky iOS WebGPU) | every item, one model | every item | every item | uneven |
 | Accuracy | small models only | small/medium (YuNet + SFace) | high | highest (ArcFace, RetinaFace, HDBSCAN, video frames) | as A |
 | Cost at ~3,700 items | $0 | $0: minutes of Hobby's 4 Active-CPU-hours | ~$4 to index + searches; AWS account | $0–10 + another platform | $0 |
