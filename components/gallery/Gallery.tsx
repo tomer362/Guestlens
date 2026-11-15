@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, m } from "motion/react";
 import { Play } from "lucide-react";
 import { Viewer } from "./Viewer";
@@ -110,7 +110,8 @@ export function useGallery(slug: string, admin = false, personId?: string) {
   return { items, person, missing, setItems: setItemsSynced, loaded, isPrivate, more, hasMore: !!nextBefore, fresh, clearFresh: () => setFresh(0), reload: () => sync(true) };
 }
 
-export function Tile({ it, onClick, i, hidden }: { it: GalleryItem; onClick: () => void; i: number; hidden?: boolean }) {
+/** Memoized: paging in the viewer changes only the two tiles whose `hidden` flips, not the whole grid. */
+export const Tile = memo(function Tile({ it, onOpen, i, hidden }: { it: GalleryItem; onOpen: (id: string) => void; i: number; hidden?: boolean }) {
   const [loaded, setLoaded] = useState(false);
   const ph = it.p ? lqipToDataUrl(it.p) : undefined;
   // first screenful loads eagerly at high priority; the rest lazily
@@ -118,7 +119,7 @@ export function Tile({ it, onClick, i, hidden }: { it: GalleryItem; onClick: () 
   return (
     // plain element + CSS entrance (no per-tile animation runtime); content-visibility lets the
     // browser skip off-screen tiles entirely, so a 3,000-photo album scrolls like a 30-photo one
-    <button type="button" onClick={onClick} data-tile={it.id}
+    <button type="button" onClick={() => onOpen(it.id)} data-tile={it.id}
       style={{ visibility: hidden ? "hidden" : undefined, animationDelay: `${Math.min(i, 12) * 25}ms` }}
       className="tile-in relative aspect-square overflow-hidden rounded-lg bg-blush active:brightness-90 [contain-intrinsic-size:auto_120px] [content-visibility:auto]">
       {ph && (
@@ -133,7 +134,7 @@ export function Tile({ it, onClick, i, hidden }: { it: GalleryItem; onClick: () 
       )}
     </button>
   );
-}
+});
 
 export function Gallery({ slug, personId, header }: { slug: string; personId?: string; header?: (g: ReturnType<typeof useGallery>) => React.ReactNode }) {
   const { t, f } = useI18n();
@@ -142,6 +143,10 @@ export function Gallery({ slug, personId, header }: { slug: string; personId?: s
   const [openId, setOpenId] = useState<string | null>(null);
   const openIdx = openId ? g.items.findIndex((x) => x.id === openId) : -1;
   const sentinel = useRef<HTMLDivElement>(null);
+  const itemsRef = useRef(g.items);
+  itemsRef.current = g.items;
+  const onIndex = useCallback((i: number) => setOpenId(itemsRef.current[i]?.id ?? null), []);
+  const onClose = useCallback(() => setOpenId(null), []);
 
   useEffect(() => {
     const el = sentinel.current;
@@ -173,14 +178,14 @@ export function Gallery({ slug, personId, header }: { slug: string; personId?: s
         <p className="py-24 text-center text-muted">{t.gallery.empty}</p>
       ) : (
         <div className="grid grid-cols-3 gap-1">
-          {g.items.map((it, i) => <Tile key={it.id} it={it} i={i} hidden={openIdx === i} onClick={() => setOpenId(it.id)} />)}
+          {g.items.map((it, i) => <Tile key={it.id} it={it} i={i} hidden={openIdx === i} onOpen={setOpenId} />)}
         </div>
       )}
       <div ref={sentinel} className="h-10" />
       <AnimatePresence>
         {openIdx >= 0 && (
-          <Viewer key="viewer" items={g.items} index={openIdx} onIndex={(i) => setOpenId(g.items[i]?.id ?? null)}
-            onClose={() => setOpenId(null)} onMore={g.more} />
+          <Viewer key="viewer" items={g.items} index={openIdx} onIndex={onIndex}
+            onClose={onClose} onMore={g.more} />
         )}
       </AnimatePresence>
     </div>

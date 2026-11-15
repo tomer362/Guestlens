@@ -7,16 +7,19 @@
  * - Swipe down to dismiss (backdrop fades and the photo shrinks with your finger)
  * - Pinch and double-tap to zoom, drag to pan while zoomed
  * - Progressive: color placeholder → cached thumb → full image fades in once decoded
- * - Neighbours are mounted (±1) and preloaded (±2) so swiping never shows a blank frame
+ * - Neighbours are mounted (±1); their full images come from a prioritised preloader (preload.ts):
+ *   current image first, then the neighbour in the direction you're browsing, then the other side,
+ *   then one more ahead. Gripping the photo / starting a swipe re-ranks it toward where you're going
  * - Tap toggles the chrome; filmstrip at the bottom; Android back button / Esc close it
  * - Share sheet with the actual file (iOS "Save Image"), download fallback
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, animate, m, useMotionValue, useTransform, type MotionValue } from "motion/react";
 import { ChevronLeft, ChevronRight, Download, Loader2, Play, Share, VolumeX, X } from "lucide-react";
 import { useI18n } from "@/lib/i18n/client";
 import { lqipToDataUrl } from "@/lib/lqip";
 import type { GalleryItem } from "@/app/api/gallery/route";
+import { constrained, useReady, want } from "./preload";
 
 type Rect = { left: number; top: number; width: number; height: number };
 // settle early (restDelta/restSpeed) so "finished" fires as soon as motion is imperceptible
@@ -95,8 +98,11 @@ function VideoPlayer({ it, onDims, onReady, toggleRef }: {
 }
 
 /** One slide: placeholder → thumb → full image (or video when active). */
-function Slide({ it, active, rect, dims, onDims, zoom, toggleRef }: {
+function Slide({ it, active, primary, rect, dims, onDims, onLoaded, zoom, toggleRef }: {
   toggleRef: React.MutableRefObject<(() => void) | null>;
+  /** the centred slide (also while the viewer is still opening): loads its full image right away */
+  primary: boolean;
+  onLoaded?: (id: string) => void;
   it: GalleryItem; active: boolean; rect: Rect | { left: MotionValue<number>; top: MotionValue<number>; width: MotionValue<number>; height: MotionValue<number> };
   dims: { w: number; h: number } | undefined; onDims: (id: string, w: number, h: number) => void;
   zoom?: { z: MotionValue<number>; px: MotionValue<number>; py: MotionValue<number> };
@@ -104,6 +110,10 @@ function Slide({ it, active, rect, dims, onDims, zoom, toggleRef }: {
   const [loaded, setLoaded] = useState(false);
   const [slow, setSlow] = useState(false);
   const ph = it.p ? lqipToDataUrl(it.p) : undefined;
+  // neighbours show their full image only once the preloader has it decoded: no stray downloads
+  const preloaded = useReady(it.url);
+  const full = primary || preloaded;
+  useEffect(() => { if (loaded && primary) onLoaded?.(it.id); }, [loaded, primary, onLoaded, it.id]);
   useEffect(() => {
     if (loaded) return;
     const t = setTimeout(() => setSlow(true), 450);
@@ -123,8 +133,8 @@ function Slide({ it, active, rect, dims, onDims, zoom, toggleRef }: {
               <span className="grid size-16 place-items-center rounded-full bg-black/45 backdrop-blur"><Play className="size-7 fill-white text-white" aria-hidden /></span>
             </span>
           )
-        ) : (
-          <img src={it.url} alt="" draggable={false} decoding="async"
+        ) : full && (
+          <img src={it.url} alt="" draggable={false} decoding="async" fetchPriority={primary ? "high" : "low"}
             className={`absolute inset-0 size-full object-contain transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0"}`}
             ref={(el) => { if (el?.complete && el.naturalWidth && !loaded) { setLoaded(true); if (!dims) onDims(it.id, el.naturalWidth, el.naturalHeight); } }}
             onLoad={(e) => {
@@ -147,6 +157,41 @@ function Slide({ it, active, rect, dims, onDims, zoom, toggleRef }: {
     </m.div>
   );
 }
+
+/**
+ * Thumbnail strip. Only a window around the current item is rendered (spacers keep the scroll
+ * geometry), so paging through a 3,000-photo album re-renders ~60 buttons, not 3,000.
+ */
+const STRIP_WIN = 30;
+const STRIP_STEP = 50; // 44 px tile + 6 px gap
+const Filmstrip = memo(function Filmstrip({ items, index, onPick }: { items: GalleryItem[]; index: number; onPick: (i: number) => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const prev = useRef<number | null>(null);
+  const lo = Math.max(0, index - STRIP_WIN), hi = Math.min(items.length, index + STRIP_WIN + 1);
+  useLayoutEffect(() => {
+    const el = ref.current?.querySelector<HTMLElement>(`[data-strip="${index}"]`);
+    // glide one step; jump (instantly) when opening the strip or skipping far
+    const smooth = prev.current !== null && Math.abs(prev.current - index) === 1;
+    el?.scrollIntoView({ inline: "center", block: "nearest", behavior: smooth ? "smooth" : "auto" });
+    prev.current = index;
+  }, [index]);
+  return (
+    <div ref={ref} className="flex gap-1.5 overflow-x-auto px-[45%] pb-1 [scrollbar-width:none]">
+      {lo > 0 && <div aria-hidden className="shrink-0" style={{ width: lo * STRIP_STEP - 6 }} />}
+      {items.slice(lo, hi).map((s, j) => {
+        const i = lo + j;
+        return (
+          <button key={s.id} type="button" data-strip={i} onClick={() => onPick(i)}
+            className={`relative size-11 shrink-0 overflow-hidden rounded-md transition-all duration-200 ${i === index ? "scale-110 ring-2 ring-white" : "opacity-60"}`}>
+            <img src={s.thumbUrl} alt="" loading="lazy" className="size-full object-cover" />
+            {s.kind === "video" && <Play className="absolute inset-0 m-auto size-3.5 fill-white text-white" aria-hidden />}
+          </button>
+        );
+      })}
+      {hi < items.length && <div aria-hidden className="shrink-0" style={{ width: (items.length - hi) * STRIP_STEP - 6 }} />}
+    </div>
+  );
+});
 
 export function Viewer({ items, index, onIndex, onClose, onMore }: {
   items: GalleryItem[]; index: number; onIndex: (i: number) => void; onClose: () => void; onMore?: () => void;
@@ -214,6 +259,7 @@ export function Viewer({ items, index, onIndex, onClose, onMore }: {
   const doClose = useCallback(() => {
     if (busy.current) return;
     busy.current = true;
+    if (paging.current) { paging.current.stop(); paging.current = null; }
     setPhase("closing");
     setChrome(false);
     // bake the current drag offset into the box, then fly home
@@ -252,30 +298,73 @@ export function Viewer({ items, index, onIndex, onClose, onMore }: {
     else doClose();
   }, [doClose]);
 
+  // --- preloading ----------------------------------------------------------------------------
+  // idxRef: the committed index, ahead of the prop while the parent re-renders
+  const idxRef = useRef(index);
+  useLayoutEffect(() => { idxRef.current = index; }, [index]);
+  /** +1 / -1: the way the guest has been browsing (most people page in one direction) */
+  const travel = useRef(1);
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  /**
+   * Rank the full images around the current one. "idle": travel-side neighbour, other neighbour,
+   * one more ahead. "moving" (a swipe has picked its side): that neighbour, the one after it, then
+   * the other side. The second image behind is never fetched; on data-saver / 2G-3G only ±1.
+   */
+  const plan = useCallback((moving?: number) => {
+    const at = (k: number) => { const g = itemsRef.current[idxRef.current + k]; return g?.kind === "photo" ? g.url : null; };
+    const t = moving ?? travel.current;
+    const ahead = constrained() ? null : at(2 * t);
+    want(moving ? [at(t), ahead, at(-t)] : [at(t), at(-t), ahead]);
+  }, []);
+  // The image on screen gets the bandwidth first: neighbours start once it has loaded (or after
+  // 1.5 s on a slow link, so swiping on is never starved). Gripping the photo starts them sooner.
+  const [landed, setLanded] = useState<string | null>(null);
+  const onLoaded = useCallback((id: string) => setLanded(id), []);
+  useEffect(() => {
+    if (landed === it.id) { plan(); return; }
+    want([]);
+    const tm = setTimeout(() => plan(), 1500);
+    return () => clearTimeout(tm);
+  }, [it.id, landed, plan]);
+  useEffect(() => () => want([]), []);
+
   // --- paging -------------------------------------------------------------------------------
   const resetZoom = useCallback(() => {
     animate(z, 1, SPRING); animate(px, 0, SPRING); animate(py, 0, SPRING); setZoomed(false);
   }, [z, px, py]);
+  const paging = useRef<{ stop: () => void; from: number; n: number } | null>(null);
+  const commit = useCallback((n: number) => {
+    idxRef.current = n;
+    onIndex(n);
+    if (n >= itemsRef.current.length - 6) onMore?.();
+  }, [onIndex, onMore]);
+  /** Finish a running page turn now, keeping the picture exactly where it is on screen. */
+  const settle = useCallback(() => {
+    const p = paging.current;
+    if (!p) return;
+    paging.current = null;
+    p.stop();
+    commit(p.n);
+    x.set(x.get() + (p.n - p.from) * dir * W); // same pixels, measured from the new centre
+  }, [commit, x, dir, W]);
   const go = useCallback((d: number) => {
-    const n = index + d;
-    if (busy.current || n < 0 || n >= items.length) { animate(x, 0, SPRING); return; }
-    busy.current = true;
+    if (busy.current) return;
+    settle(); // a swipe during a page turn chains on instead of being dropped
+    const from = idxRef.current, n = from + d;
+    if (n < 0 || n >= itemsRef.current.length) { animate(x, 0, SPRING); return; }
+    travel.current = d;
     resetZoom();
-    animate(x, -d * dir * W, PAGE).finished.then(() => {
-      onIndex(n);
+    const a = animate(x, -d * dir * W, PAGE);
+    const p = { stop: () => a.stop(), from, n };
+    paging.current = p;
+    a.finished.then(() => {
+      if (paging.current !== p) return; // settled or cancelled meanwhile
+      paging.current = null;
+      commit(n);
       x.set(0);
-      busy.current = false;
-      if (n >= items.length - 6) onMore?.();
     });
-  }, [index, items.length, dir, W, x, onIndex, onMore, resetZoom]);
-
-  // preload ±2 full images
-  useEffect(() => {
-    for (const k of [1, -1, 2, -2]) {
-      const n = items[index + k];
-      if (n?.kind === "photo") { const im = new Image(); im.decoding = "async"; im.src = n.url; }
-    }
-  }, [items, index]);
+  }, [dir, W, x, resetZoom, settle, commit]);
 
   // keyboard
   useEffect(() => {
@@ -292,7 +381,7 @@ export function Viewer({ items, index, onIndex, onClose, onMore }: {
   const g = useRef({
     pts: new Map<number, { x: number; y: number }>(),
     mode: "none" as "none" | "swipe-x" | "swipe-y" | "pan" | "pinch" | "pending",
-    sx: 0, sy: 0, st: 0, lx: 0, ly: 0, lt: 0, vx: 0, vy: 0,
+    sx: 0, sy: 0, st: 0, lx: 0, ly: 0, lt: 0, vx: 0, vy: 0, bx: 0,
     pinchD: 0, pinchZ: 1, pinchMid: { x: 0, y: 0 }, pinchP: { x: 0, y: 0 },
     lastTap: 0, tapTimer: 0 as ReturnType<typeof setTimeout> | 0,
   });
@@ -304,6 +393,9 @@ export function Viewer({ items, index, onIndex, onClose, onMore }: {
     if (phase !== "open" || busy.current) return;
     if ((e.target as HTMLElement).closest("button, a")) return;
     const s = g.current;
+    settle(); // grabbed mid page-turn: take over from where the picture is
+    // a grip is intent to move: get both neighbours going now (no-op when they're ready already)
+    if (s.pts.size === 0) plan();
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     s.pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (s.pts.size === 2) {
@@ -317,6 +409,7 @@ export function Viewer({ items, index, onIndex, onClose, onMore }: {
       return;
     }
     s.mode = zoomed ? "pan" : "pending";
+    s.bx = x.get();
     s.sx = s.lx = e.clientX; s.sy = s.ly = e.clientY; s.st = s.lt = performance.now(); s.vx = s.vy = 0;
   };
   const onMove = (e: React.PointerEvent) => {
@@ -345,12 +438,16 @@ export function Viewer({ items, index, onIndex, onClose, onMore }: {
       py.set(clamp(py.get() + (e.movementY || 0), -my - 40, my + 40));
       return;
     }
-    if (s.mode === "pending" && Math.hypot(dx, dy) > 8) s.mode = Math.abs(dx) > Math.abs(dy) ? "swipe-x" : "swipe-y";
+    if (s.mode === "pending" && Math.hypot(dx, dy) > 8) {
+      s.mode = Math.abs(dx) > Math.abs(dy) ? "swipe-x" : "swipe-y";
+      // the side is known ~50 ms into the gesture: rank that neighbour (and the one after it) first
+      if (s.mode === "swipe-x") plan(dx * dir < 0 ? 1 : -1);
+    }
     if (s.mode === "swipe-x") {
-      const hasTarget = items[index + (dx * dir < 0 ? 1 : -1)];
-      x.set(hasTarget ? dx : dx * 0.3); // rubber band at the ends
+      const hasTarget = items[idxRef.current + (dx * dir < 0 ? 1 : -1)];
+      x.set(s.bx + (hasTarget ? dx : dx * 0.3)); // rubber band at the ends
     } else if (s.mode === "swipe-y") {
-      y.set(dy); x.set(dx * 0.4);
+      y.set(dy); x.set(s.bx + dx * 0.4);
     }
   };
   const onUp = (e: React.PointerEvent) => {
@@ -384,8 +481,9 @@ export function Viewer({ items, index, onIndex, onClose, onMore }: {
     } else if (s.mode === "swipe-y") {
       if (Math.abs(dy) > 110 || Math.abs(s.vy) > 700) requestClose();
       else { animate(y, 0, SPRING); animate(x, 0, SPRING); }
-    } else if (s.mode === "pending" && dur < 300) {
-      handleTap(e.clientX, e.clientY);
+    } else if (s.mode === "pending") {
+      if (s.bx) animate(x, 0, SPRING); // grabbed mid page-turn and let go: finish the turn
+      if (dur < 300) handleTap(e.clientX, e.clientY);
     }
     s.mode = "none";
   };
@@ -436,10 +534,7 @@ export function Viewer({ items, index, onIndex, onClose, onMore }: {
   const canShareFiles = useMemo(() => typeof navigator !== "undefined" && !!navigator.canShare, []);
 
   // --- filmstrip --------------------------------------------------------------------------------
-  const strip = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    strip.current?.querySelector<HTMLElement>(`[data-strip="${index}"]`)?.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" });
-  }, [index, chrome]);
+  const pick = useCallback((i: number) => { if (i !== idxRef.current) { settle(); idxRef.current = i; onIndex(i); } }, [onIndex, settle]);
 
   const showChrome = chrome && phase !== "closing";
   const slides = [-1, 0, 1].map((k) => ({ k, g: items[index + k] })).filter((s) => s.g);
@@ -456,6 +551,7 @@ export function Viewer({ items, index, onIndex, onClose, onMore }: {
           {slides.map(({ k, g: s }) => (
             <m.div key={s.id} className="absolute inset-0" style={k === 0 ? { y, scale: dragScale } : { left: k * dir * W }}>
               <Slide it={s} active={k === 0 && phase !== "opening"} dims={dimsOf(s)} onDims={onDims} toggleRef={videoToggle}
+                primary={k === 0} onLoaded={onLoaded}
                 rect={k === 0 ? { left: L, top: T, width: BW, height: BH } : rectFor(s)}
                 zoom={k === 0 ? { z, px, py } : undefined} />
             </m.div>
@@ -508,15 +604,7 @@ export function Viewer({ items, index, onIndex, onClose, onMore }: {
         {showChrome && items.length > 1 && (
           <m.div key="strip" className="safe-bottom absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/60 to-transparent pt-6"
             initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 16 }} transition={{ duration: 0.18 }}>
-            <div ref={strip} className="flex gap-1.5 overflow-x-auto px-[45%] pb-1 [scrollbar-width:none]">
-              {items.map((s, i) => (
-                <button key={s.id} type="button" data-strip={i} onClick={() => i !== index && onIndex(i)}
-                  className={`relative size-11 shrink-0 overflow-hidden rounded-md transition-all duration-200 ${i === index ? "scale-110 ring-2 ring-white" : "opacity-60"}`}>
-                  {Math.abs(i - index) < 40 && <img src={s.thumbUrl} alt="" loading="lazy" className="size-full object-cover" />}
-                  {s.kind === "video" && <Play className="absolute inset-0 m-auto size-3.5 fill-white text-white" aria-hidden />}
-                </button>
-              ))}
-            </div>
+            <Filmstrip items={items} index={index} onPick={pick} />
           </m.div>
         )}
       </AnimatePresence>
