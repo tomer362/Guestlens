@@ -32,7 +32,7 @@ interface OrtSession {
 interface Ort {
   InferenceSession: { create(model: Uint8Array, opts?: Record<string, unknown>): Promise<OrtSession> };
   Tensor: new (type: "float32", data: Float32Array, dims: number[]) => OrtTensor;
-  env: { wasm?: { numThreads?: number } };
+  env: { logLevel?: string; wasm?: { numThreads?: number } };
 }
 
 async function importOrt(): Promise<{ ort: Ort; runtime: string }> {
@@ -57,11 +57,14 @@ async function load(): Promise<Loaded> {
   const { ort, runtime } = await importOrt();
   // one thread: functions get ~1 vCPU, and WASM threads would need worker files traced too
   if (ort.env.wasm) ort.env.wasm.numThreads = 1;
+  // the OpenCV Zoo exports keep their weights as graph inputs, which makes ORT print ~200
+  // "Initializer … appears in graph inputs" warnings per cold start: harmless, but they bury the logs
+  ort.env.logLevel = "error";
   const read = async (f: string) => {
     try { return new Uint8Array(await readFile(path.join(MODELS_DIR, f))); }
     catch { throw new ModelUnavailable(`missing model lib/faces/models/${f} (npm run faces:models)`); }
   };
-  const opts = { executionProviders: [runtime === "onnxruntime-node" ? "cpu" : "wasm"], graphOptimizationLevel: "all" };
+  const opts = { executionProviders: [runtime === "onnxruntime-node" ? "cpu" : "wasm"], graphOptimizationLevel: "all", logSeverityLevel: 3 };
   const [det, emb] = await Promise.all([
     read(MODEL_FILES.detector).then((b) => ort.InferenceSession.create(b, opts)),
     read(MODEL_FILES.embedder).then((b) => ort.InferenceSession.create(b, opts)),

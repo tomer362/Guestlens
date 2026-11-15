@@ -1,6 +1,7 @@
 # People: face detection and grouping
 
-Status: Phase 1 built and behind an admin switch (off by default) · 2026-11-15
+Status: Phase 1 working end to end and behind an admin switch (off by default) · 2026-11-15
+Runtime (`onnxruntime-web`, `sharp`) and both models are in the repo, so a deploy can run it as is.
 Part of [ARCHITECTURE.md](ARCHITECTURE.md).
 
 The **People** page shows one circle per person at the event, using their face. Tapping it shows every photo and video they're in. It fills in during the night as uploads arrive.
@@ -122,12 +123,16 @@ Face vectors are biometric data. They are "especially sensitive information" und
 - **Neon:** ~3–4 KB per face (vector + crop), so ~40 MB for 10k faces.
 
 ## 6. Setup (turning it on)
-1. `npm i onnxruntime-web` (WASM, ~25 MB on the server; no native binaries). On a non-Vercel host, `onnxruntime-node` is faster; the code uses whichever is installed.
-2. `npm run faces:models`, then commit `lib/faces/models/*.onnx` (YuNet ~230 KB MIT, SFace ~37 MB Apache-2.0).
-3. Optional: set `CRON_SECRET` in Vercel so only Vercel can call the daily cron.
-4. Deploy. The migration runs by itself (pgvector is available on every Neon plan).
-5. Admin → **People → ON**. The admin page shows whether the server could load the models.
-6. Tune on real photos before the event: `npm run faces:eval -- ~/rehearsal-photos 0.4 3` writes `faces-eval.html`, one row of faces per person. Set `FACES_ASSIGN_SIM` / `FACES_MIN_FACES` in Vercel if the defaults merge or split too much.
+`onnxruntime-web` (WASM, no native binaries) and `sharp` are dependencies, and both models are committed in `lib/faces/models/`. Nothing to install. On a non-Vercel host, `npm i onnxruntime-node` is faster; the code uses whichever is installed.
+1. Optional: set `CRON_SECRET` in Vercel so only Vercel can call the daily cron.
+2. Deploy. The migration runs by itself (pgvector is available on every Neon plan).
+3. Admin → **People → ON**. The admin page shows whether the server could load the models. Photos already in the album are queued at once.
+4. Tune on real photos before the event: `npm run faces:eval -- ~/rehearsal-photos 0.4 3` writes `faces-eval.html`, one row of faces per person. Set `FACES_ASSIGN_SIM` / `FACES_MIN_FACES` in Vercel if the defaults merge or split too much.
+
+### Verified
+- **End-to-end test** (`npm run test:faces`, `tests/faces-e2e.test.ts`): real Postgres + pgvector, the migrations, photos served over HTTP like Blob, `enqueueFaceJob` → `drainFaceJobs` → clustering → a forced regroup → `GET /api/people`, a person's media and a cover crop. It needs `FACES_TEST_DB` (a Postgres it may create a database on) and `FACES_TEST_IMAGES` (photos named `<person>_*.jpg`, ≥ 3 per person, strangers start with `x`); otherwise it skips.
+- **Measured on sample photos** (WASM, 1 thread): ~150–280 ms per photo after an ~0.8 s cold model load. Same person (different photos): similarity 0.74–0.95. Different people: ≤ 0.11. Threshold: 0.40.
+- **Vercel bundle:** the face routes trace to ~96 MB (models, the ORT wasm, sharp/libvips), under the 250 MB limit. The models load from only the traced files.
 
 ## 7. Not in Phase 1
 - Video frame sampling (§3, Videos).
