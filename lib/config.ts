@@ -70,5 +70,36 @@ export const GALLERY = {
   pageMaxAge: 300,
 } as const;
 
+/**
+ * Face grouping (FACES.md). Similarities are cosine on L2-normalised SFace vectors.
+ * Tune `assignSim` / `minFaces` on rehearsal photos with scripts/faces-eval.ts.
+ */
+export const FACES = {
+  /** detector input: the image is letterboxed into this square (YuNet 2023mar is fixed at 640) */
+  detectSize: 640,
+  minScore: 0.8,
+  /** smallest face side in source pixels worth embedding */
+  minFacePx: 36,
+  /** faces below this quality may join a person but never start one */
+  seedQuality: 0.45,
+  /** neighbours this similar count as "the same person" (SFace's own match threshold is 0.363) */
+  assignSim: Number(process.env.FACES_ASSIGN_SIM) || 0.4,
+  neighbours: 10,
+  /** a new person needs this many mutually similar faces (DBSCAN core point, Immich-style) */
+  minFaces: Number(process.env.FACES_MIN_FACES) || 3,
+  /** full regroup once the face count grew by max(rebuildMin, rebuildFrac × last count) */
+  rebuildMin: 200,
+  rebuildFrac: 0.25,
+  /** jobs per background drain, and its time budget (the function's duration also covers the response) */
+  jobsPerDrain: 8,
+  drainBudgetMs: 45_000,
+  jobLeaseMs: 90_000,
+  maxAttempts: 3,
+  clusterLeaseMs: 60_000,
+  cropEdge: 96,
+  /** purge faces/people this many days after an event's last upload (daily cron) */
+  retentionDays: Number(process.env.FACES_RETENTION_DAYS) || 60,
+} as const;
+
 export const MB_ = MB;
 export const GB_ = GB;

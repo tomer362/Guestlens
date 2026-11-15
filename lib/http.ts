@@ -25,7 +25,8 @@ const TTL = 15_000;
 /** Local UI development without a database: /e/demo renders with a fake event. */
 export const DEMO_EVENT: EventRow = {
   id: "00000000-0000-0000-0000-000000000000", slug: "demo", name: "החתונה של נועה ואיתי", pinHash: null,
-  adminKeyHash: "", uploadOpen: true, galleryPublic: true, mediaVersion: 0, createdAt: new Date(0),
+  adminKeyHash: "", uploadOpen: true, galleryPublic: true, mediaVersion: 0,
+  facesEnabled: false, peopleVersion: 0, facesLockUntil: new Date(0), facesRebuiltAtCount: 0, createdAt: new Date(0),
 };
 export const demoMode = () => process.env.GL_DEMO === "1" || (!databaseUrl() && process.env.NODE_ENV !== "production");
 

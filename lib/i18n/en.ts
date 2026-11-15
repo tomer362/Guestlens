@@ -5,7 +5,7 @@ export const en = {
   common: {
     next: "Next", back: "Back", skip: "Skip", done: "Done", close: "Close", retry: "Retry",
     howItWorks: "How it works", gallery: "Gallery", camera: "Upload", loading: "Loading…",
-    copyLink: "Copy link", copied: "Copied!",
+    copyLink: "Copy link", copied: "Copied!", people: "People",
   },
   onboarding: {
     welcomeTitle: "Welcome to {event}",
@@ -81,6 +81,18 @@ export const en = {
     loadMore: "Load more",
     private: "The album is private. Only the couple can see it 💌",
     download: "Download",
+  },
+  people: {
+    title: "People",
+    empty: "No one here yet. Faces show up as photos come in.",
+    disabled: "People isn't turned on for this event",
+    count: "{n} photos",
+    back: "All people",
+    hideMe: "This is me. Hide me",
+    hideConfirm: "Hide this person from the People page? The photos stay in the album.",
+    hidden: "Hidden from People. Thanks for telling us",
+    notice: "Photos are grouped by face automatically so you can find people. Face data is used only for this event's album and is deleted afterwards.",
+    includeMine: "Include faces from my uploads",
   },
   errors: {
     notFound: "We couldn't find this event",

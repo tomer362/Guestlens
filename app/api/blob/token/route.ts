@@ -7,6 +7,9 @@ import { markPart } from "@/lib/media";
 import { mediaPath, type UploadPart } from "@/lib/storage/provider";
 import { err, json } from "@/lib/http";
 
+// covers the background face scan that the upload webhook can start (lib/media.ts afterReady)
+export const maxDuration = 60;
+
 export async function POST(req: Request) {
   const body = (await req.json()) as HandleUploadBody;
   try {
